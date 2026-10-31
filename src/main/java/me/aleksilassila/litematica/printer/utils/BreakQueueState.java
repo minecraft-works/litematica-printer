@@ -19,6 +19,8 @@ final class BreakQueueState {
     private BlockPos activePos;
     private boolean forceDelayedDestroy;
     private int externalDestroyLockTicks;
+    private int breaksThisTick;
+    private int breakDelayTicks;
 
     boolean add(BlockPos pos) {
         if (pos == null) return false;
@@ -73,6 +75,27 @@ final class BreakQueueState {
         if (this.externalDestroyLockTicks > 0) {
             this.externalDestroyLockTicks--;
         }
+        this.breaksThisTick = 0;
+        if (this.breakDelayTicks > 0) {
+            this.breakDelayTicks--;
+        }
+    }
+
+    int breaksThisTick() {
+        return this.breaksThisTick;
+    }
+
+    void recordBreak() {
+        this.breaksThisTick++;
+    }
+
+    boolean isBreakDelayed() {
+        return this.breakDelayTicks > 0;
+    }
+
+    /** The next queued break may start once {@code intervalTicks} ticks have passed; 0 or 1 means every tick. */
+    void startBreakDelay(int intervalTicks) {
+        this.breakDelayTicks = Math.max(0, intervalTicks);
     }
 
     void clearIfDisabled(boolean enabled) {
@@ -84,6 +107,8 @@ final class BreakQueueState {
         this.queuedBreaks.clear();
         this.clearActive();
         this.externalDestroyLockTicks = 0;
+        this.breaksThisTick = 0;
+        this.breakDelayTicks = 0;
     }
 
     void reset() {
@@ -94,6 +119,8 @@ final class BreakQueueState {
         this.activePos = null;
         this.forceDelayedDestroy = false;
         this.externalDestroyLockTicks = 0;
+        this.breaksThisTick = 0;
+        this.breakDelayTicks = 0;
     }
 
     boolean isLocked() {

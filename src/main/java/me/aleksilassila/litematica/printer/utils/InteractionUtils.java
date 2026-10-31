@@ -146,7 +146,10 @@ public final class InteractionUtils implements RuntimeComponent {
             return;
         }
         if (this.breakState.activePos() == null) {
-            while (this.breakState.hasQueued()) {
+            if (this.breakState.isBreakDelayed()) {
+                return;
+            }
+            while (this.breakState.hasQueued() && this.remainingBreakBudget() > 0) {
                 BlockPos pos = this.breakState.pollQueued();
                 if (pos == null) {
                     continue;
@@ -163,12 +166,7 @@ public final class InteractionUtils implements RuntimeComponent {
                     this.breakState.activePos(pos);
                     break;
                 }
-                if (result == BlockBreakResult.COMPLETED || result == BlockBreakResult.COMPLETED_WAIT) {
-                    this.markRecentlyBroken(pos);
-                    if (result == BlockBreakResult.COMPLETED_WAIT) {
-                        this.markPendingBroken(pos, ConfigUtils.getBreakCooldown());
-                    }
-                }
+                this.onBreakFinished(pos, result);
             }
         } else {
             BlockPos activePos = this.breakState.activePos();
@@ -192,16 +190,29 @@ public final class InteractionUtils implements RuntimeComponent {
             BlockBreakResult result = continueDestroyBlock(activePos, Direction.DOWN);
             this.observeBreakResult(activePos, result);
             if (result != BlockBreakResult.IN_PROGRESS) {
-                if (result == BlockBreakResult.COMPLETED || result == BlockBreakResult.COMPLETED_WAIT) {
-                    this.markRecentlyBroken(activePos);
-                    if (result == BlockBreakResult.COMPLETED_WAIT) {
-                        this.markPendingBroken(activePos, ConfigUtils.getBreakCooldown());
-                    }
-                }
+                this.onBreakFinished(activePos, result);
                 this.breakState.clearActive();
                 onTick();
             }
         }
+    }
+
+    // Print-mode breaks share the Break.BREAK_BLOCKS_PER_TICK / BREAK_INTERVAL pacing with mining mode.
+    private int remainingBreakBudget() {
+        int budget = Configs.Break.BREAK_BLOCKS_PER_TICK.getIntegerValue();
+        return budget <= 0 ? Integer.MAX_VALUE : Math.max(0, budget - this.breakState.breaksThisTick());
+    }
+
+    private void onBreakFinished(BlockPos pos, BlockBreakResult result) {
+        if (result != BlockBreakResult.COMPLETED && result != BlockBreakResult.COMPLETED_WAIT) {
+            return;
+        }
+        this.markRecentlyBroken(pos);
+        if (result == BlockBreakResult.COMPLETED_WAIT) {
+            this.markPendingBroken(pos, ConfigUtils.getBreakCooldown());
+        }
+        this.breakState.recordBreak();
+        this.breakState.startBreakDelay(Configs.Break.BREAK_INTERVAL.getIntegerValue());
     }
 
     private void observeBreakResult(BlockPos pos, BlockBreakResult result) {
