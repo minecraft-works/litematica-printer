@@ -45,11 +45,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /** Real mining controller, prediction bridge and vanilla cancellation; headless world/network boundaries. */
 class MiningInteractionRegressionTest {
-    // The stubbed player has no world; a real swing would touch state it does not have.
-    @BeforeAll static void bootstrap() {
-        InventoryRegressionTest.bootstrap();
-        Configs.Break.BREAK_SWING_ARM.setBooleanValue(false);
-    }
+    @BeforeAll static void bootstrap() { InventoryRegressionTest.bootstrap(); }
     static final BlockPos TARGET = new BlockPos(2, 64, 2);
     static final sun.misc.Unsafe U;
     static {
