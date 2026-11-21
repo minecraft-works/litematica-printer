@@ -45,7 +45,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /** Real mining controller, prediction bridge and vanilla cancellation; headless world/network boundaries. */
 class MiningInteractionRegressionTest {
-    @BeforeAll static void bootstrap() { InventoryRegressionTest.bootstrap(); }
+    // The stubbed player has no world; a real swing would touch state it does not have.
+    @BeforeAll static void bootstrap() {
+        InventoryRegressionTest.bootstrap();
+        Configs.Break.BREAK_SWING_ARM.setBooleanValue(false);
+    }
     static final BlockPos TARGET = new BlockPos(2, 64, 2);
     static final sun.misc.Unsafe U;
     static {
@@ -81,12 +85,6 @@ class MiningInteractionRegressionTest {
         @Override public float getDestroySpeed(BlockState state) { return speed; }
         @Override public boolean hasCorrectToolForDrops(BlockState state) { return true; }
         @Override public void resetAttackStrengthTicker() { }
-        //#if MC >= 260300
-        //$$ @Override public void swing(net.minecraft.world.InteractionHand hand,
-        //$$         net.minecraft.world.item.component.SwingAnimation animation, boolean sendToSwingingEntity) { }
-        //#else
-        @Override public void swing(net.minecraft.world.InteractionHand hand) { }
-        //#endif
     }
     static class Connection extends ClientPacketListener {
         Connection() { super(null, null, null); }
