@@ -8,6 +8,8 @@
   "litematica-printer.config.breakBlocksPerTick.desc": "挖掘模式与打印自动破坏(多余/错误/错误状态方块)每游戏刻可处理的方块数量。数值越高，每次破坏的方块越多(前提是方块可以在一游戏刻内破坏)。\n设为§b0§r时无上限。会因发包过多被踢出的服务器建议设为§b1§r。",
   "litematica-printer.config.breakCheckHardness": "检查方块硬度",
   "litematica-printer.config.breakCheckHardness.desc": "是否跳过无法破坏的方块(也就是硬度为-1的方块)，如果只在服务端修改了某些方块的硬度，可以关闭此选项。",
+  "litematica-printer.config.breakSwingArm": "破坏时挥动手臂",
+  "litematica-printer.config.breakSwingArm.desc": "破坏方块时挥动主手，自己可以看到破坏动画，其他玩家也会通过挥手数据包看到。",
   "litematica-printer.config.breakAutoTool": "自动切换工具",
   "litematica-printer.config.breakAutoTool.desc": "破坏方块前自动切换到背包中更合适的工具。\n如果 Tweakeroo 的工具切换功能已开启，将优先使用 Tweakeroo，避免重复切换。",
   "litematica-printer.config.breakCooldown": "挖掘重试冷却时间",

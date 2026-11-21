@@ -393,6 +393,11 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
                 .defaultValue(false)
                 .build();
 
+        // Sends the arm swing while breaking so the local player animates and other players see it.
+        public static final ConfigBoolean BREAK_SWING_ARM = bool("breakSwingArm")
+                .defaultValue(true)
+                .build();
+
         // 模式限制器
         public static final ConfigOptionList BREAK_LIMITER = optionList("breakLimiter")
                 .defaultValue(ExcavateListMode.CUSTOM)
@@ -422,6 +427,7 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
                 BREAK_COOLDOWN,
                 BREAK_CHECK_HARDNESS,
                 BREAK_AUTO_TOOL,
+                BREAK_SWING_ARM,
                 // 限制器
                 BREAK_LIMITER,
                 BREAK_LIMIT,

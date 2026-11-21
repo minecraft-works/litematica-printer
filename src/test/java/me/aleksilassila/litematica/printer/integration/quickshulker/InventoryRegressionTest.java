@@ -37,6 +37,8 @@ import static org.junit.jupiter.api.Assertions.*;
 class InventoryRegressionTest {
     // Headless diagnostics: only allocate the context value object; no Minecraft client is launched.
     @BeforeAll static void bootstrap() {
+        // The stubbed players have no world; a real arm swing would touch state they do not have.
+        me.aleksilassila.litematica.printer.config.Configs.Break.BREAK_SWING_ARM.setBooleanValue(false);
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
         //#if MC >= 260100

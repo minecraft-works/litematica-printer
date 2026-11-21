@@ -8,6 +8,8 @@
   "litematica-printer.config.breakBlocksPerTick.desc": "Number of blocks mining mode and print auto-breaking (extra / wrong / wrong-state blocks) can process per game tick. Higher values mean more blocks broken each time, provided they can be broken within one tick.\nSet to §b0§r for no limit. Use §b1§r on servers that kick for too many packets.",
   "litematica-printer.config.breakCheckHardness": "Check Block Hardness",
   "litematica-printer.config.breakCheckHardness.desc": "Whether to skip unbreakable blocks (blocks with hardness of -1). If only the hardness of certain blocks has been modified on the server side, you can disable this option.",
+  "litematica-printer.config.breakSwingArm": "Swing Arm While Breaking",
+  "litematica-printer.config.breakSwingArm.desc": "Swing the main hand while breaking blocks, so the break animation is visible to you and, through the swing packet, to other players.",
   "litematica-printer.config.breakAutoTool": "Auto Tool Switch",
   "litematica-printer.config.breakAutoTool.desc": "Automatically switch to a better tool before breaking blocks.\nIf Tweakeroo's tool switch is enabled, Tweakeroo is used instead to avoid duplicate switching.",
   "litematica-printer.config.breakCooldown": "Mining Retry Cooldown",

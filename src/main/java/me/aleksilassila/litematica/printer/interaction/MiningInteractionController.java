@@ -10,6 +10,10 @@ import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action;
+import net.minecraft.world.InteractionHand;
+//#if MC >= 260300
+//$$ import net.minecraft.world.item.component.SwingAnimation;
+//#endif
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -32,6 +36,7 @@ public final class MiningInteractionController {
     private boolean suppressFastBreak;
     private BlockPos lastLoggedProgressPos;
     private long lastLoggedProgressTick = Long.MIN_VALUE;
+    private long lastSwingTick = Long.MIN_VALUE;
 
     public MiningInteractionController(MiningInteractionPort port, ToolSwitchService toolSwitchService) {
         this.port = port;
@@ -54,6 +59,7 @@ public final class MiningInteractionController {
         this.suppressFastBreak = false;
         this.lastLoggedProgressPos = null;
         this.lastLoggedProgressTick = Long.MIN_VALUE;
+        this.lastSwingTick = Long.MIN_VALUE;
         this.feedback.reset();
     }
 
@@ -135,6 +141,7 @@ public final class MiningInteractionController {
             return BlockBreakResult.IN_PROGRESS;
         }
         this.port.ensureCarriedItemSent();
+        this.swingArm(player);
         float progress = state.getDestroyProgress(player, level, pos);
         // The server breaks on STOP when delta * (elapsed + 1) >= 0.7 regardless of any config.
         // Gating the fast path on the configurable threshold made blocks whose delta sits just below
@@ -228,6 +235,7 @@ public final class MiningInteractionController {
             return BlockBreakResult.FAILED;
         }
         if (player.getAbilities().instabuild) {
+            this.swingArm(player);
             if (manualSound) this.feedback.playHitSound(player, level, state, pos, true);
             NetworkUtils.sendPacket(sequence -> {
                 if (localRemoval) this.port.destroyBlock(pos);
@@ -247,6 +255,7 @@ public final class MiningInteractionController {
         if (this.pendingDelayedDestroys.containsKey(pos)) {
             return this.port.isDestroying() ? BlockBreakResult.IN_PROGRESS : BlockBreakResult.COMPLETED;
         }
+        this.swingArm(player);
         if (this.port.isDestroying() && !pos.equals(this.port.destroyPos())) this.abortPrevious(player, pos, direction);
         if (this.port.isDestroying() && pos.equals(this.port.destroyPos())) {
             this.port.destroyProgress(this.port.destroyProgress() + state.getDestroyProgress(player, level, pos));
@@ -380,6 +389,20 @@ public final class MiningInteractionController {
         float progress = this.port.destroyProgress() >= 0.7F
                 ? 1.0F : this.port.destroyProgress();
         return progress > 0.0F ? (int) (progress * 10.0F) : -1;
+    }
+
+    // LocalPlayer.swing sends the swing packet that other players see (26.3 swings through LivingEntity).
+    // Once per tick, like vanilla, even when a session breaks many blocks in that tick.
+    private void swingArm(LocalPlayer player) {
+        if (!Configs.Break.BREAK_SWING_ARM.getBooleanValue()) return;
+        long tick = this.clientTick();
+        if (tick == this.lastSwingTick) return;
+        this.lastSwingTick = tick;
+        //#if MC >= 260300
+        //$$ player.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, true);
+        //#else
+        player.swing(InteractionHand.MAIN_HAND);
+        //#endif
     }
 
     private void send(Action action, BlockPos pos, Direction direction) {
