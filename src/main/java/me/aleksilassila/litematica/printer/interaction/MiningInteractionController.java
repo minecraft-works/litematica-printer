@@ -12,6 +12,10 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action;
 import net.minecraft.world.InteractionHand;
+//#if MC >= 260300
+//$$ import net.minecraft.network.protocol.game.ServerboundSwingPacket;
+//$$ import net.minecraft.world.item.component.SwingAnimation;
+//#endif
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -439,14 +443,19 @@ public final class MiningInteractionController {
         return progress > 0.0F ? (int) (progress * 10.0F) : -1;
     }
 
-    // LocalPlayer.swing also sends the swing packet, which is what other players see.
+    // Before 26.3 LocalPlayer.swing sends the swing packet that other players see; 26.3 needs it sent explicitly.
     // Once per tick, like vanilla, even when a session breaks many blocks in that tick.
     private void swingArm(LocalPlayer player) {
         if (!Configs.Break.BREAK_SWING_ARM.getBooleanValue()) return;
         long tick = this.clientTick();
         if (tick == this.lastSwingTick) return;
         this.lastSwingTick = tick;
+        //#if MC >= 260300
+        //$$ player.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, true);
+        //$$ NetworkUtils.sendPacket(ServerboundSwingPacket.INSTANCE);
+        //#else
         player.swing(InteractionHand.MAIN_HAND);
+        //#endif
     }
 
     private void send(Action action, BlockPos pos, Direction direction) {

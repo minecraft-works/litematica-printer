@@ -81,7 +81,12 @@ class MiningInteractionRegressionTest {
         @Override public float getDestroySpeed(BlockState state) { return speed; }
         @Override public boolean hasCorrectToolForDrops(BlockState state) { return true; }
         @Override public void resetAttackStrengthTicker() { }
+        //#if MC >= 260300
+        //$$ @Override public void swing(net.minecraft.world.InteractionHand hand,
+        //$$         net.minecraft.world.item.component.SwingAnimation animation, boolean sendToSwingingEntity) { }
+        //#else
         @Override public void swing(net.minecraft.world.InteractionHand hand) { }
+        //#endif
     }
     static class Connection extends ClientPacketListener {
         Connection() { super(null, null, null); }
