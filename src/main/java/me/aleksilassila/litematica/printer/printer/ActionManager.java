@@ -2,15 +2,16 @@ package me.aleksilassila.litematica.printer.printer;
 
 import java.util.function.Function;
 import me.aleksilassila.litematica.printer.feature.FeatureActionPolicies;
-//#if MC > 12100
+import me.aleksilassila.litematica.printer.integration.voidwarehouse.VoidWarehousePlacementPolicy;
+import me.aleksilassila.litematica.printer.integration.voidwarehouse.VoidWarehousePlacementNetwork;
 import fi.dy.masa.litematica.util.EasyPlaceUtils;
-//#endif
 import me.aleksilassila.litematica.printer.Reference;
 import me.aleksilassila.litematica.printer.printer.action.PlacementPolicy;
 import me.aleksilassila.litematica.printer.mixin_extension.MultiPlayerGameModeExtension;
 import me.aleksilassila.litematica.printer.utils.mods.QuickShulkerBridge;
 import me.aleksilassila.litematica.printer.utils.minecraft.DirectionUtils;
 import me.aleksilassila.litematica.printer.utils.InventoryUtils;
+import me.aleksilassila.litematica.printer.utils.VoidWarehouseTriggerItem;
 import me.aleksilassila.litematica.printer.utils.minecraft.NetworkUtils;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
@@ -28,13 +29,10 @@ import org.jetbrains.annotations.Nullable;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.state.BlockState;
 
-//#if MC > 12105
 import net.minecraft.network.protocol.game.ServerboundPlayerInputPacket;
 import net.minecraft.world.entity.player.Input;
-//#else
-//$$ import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
-//#endif
 
 @SuppressWarnings("SpellCheckingInspection")
 public class ActionManager {
@@ -65,7 +63,7 @@ public class ActionManager {
     }
 
     public enum SendResult {
-        /** Local useItemOn was accepted for dispatch; server placement is confirmed elsewhere. */
+        /** The interaction was accepted locally or its use packet was submitted; server confirmation is separate. */
         SENT,
         WAITING_FOR_LOOK,
         NO_QUEUED_ACTION,
@@ -149,11 +147,37 @@ public class ActionManager {
         return true;
     }
 
+    public boolean setWaterSurfacePlacement() {
+        if (this.queuedClick == null) return false;
+        this.queuedClick.waterSurfacePlacement = true;
+        return true;
+    }
+
     public boolean setExpectedStackPredicate(@Nullable Predicate<ItemStack> expectedStackPredicate) {
         if (this.queuedClick == null) {
             return false;
         }
         this.queuedClick.expectStack(expectedStackPredicate);
+        return true;
+    }
+
+    public boolean setWarehousePlacement(BlockPos target, int expectedStateId) {
+        if (this.queuedClick != null && this.queuedClick.useProtocol) return false;
+        return this.markWarehousePlacement(target, expectedStateId, null);
+    }
+
+    public boolean setWarehouseStatePlacement(BlockPos target, int expectedStateId, BlockState desiredState) {
+        return desiredState != null && this.markWarehousePlacement(target, expectedStateId, desiredState);
+    }
+
+    private boolean markWarehousePlacement(BlockPos target, int expectedStateId, @Nullable BlockState desiredState) {
+        QueuedClick click = this.queuedClick;
+        if (click == null || click.repeatCount != 1 || expectedStateId < 0
+                || click.expectedStackPredicate != null
+                || !VoidWarehousePlacementPolicy.supportsItems(click.expectedItems)) return false;
+        click.warehouseTarget = target.immutable();
+        click.warehouseExpectedStateId = expectedStateId;
+        click.warehouseDesiredState = desiredState;
         return true;
     }
 
@@ -179,10 +203,16 @@ public class ActionManager {
         if (needWaitModifyLook) {
             needWaitModifyLook = false;
         }
-        if (!isHoldingExpectedItem(player, click)) {
+        if (click.warehouseTarget == null && !isHoldingExpectedItem(player, click)) {
             return this.finish(click, SendResult.HELD_ITEM_CHANGED);
         }
-        int reserveAllowance = getReserveAllowance(player, click);
+        if (click.warehouseTarget != null && (click.useProtocol && click.warehouseDesiredState == null
+                || click.expectedStackPredicate != null
+                || !VoidWarehousePlacementPolicy.supportsItems(click.expectedItems))) {
+            return this.finish(click, SendResult.INTERACTION_REJECTED);
+        }
+        int reserveAllowance = click.warehouseTarget == null
+                ? getReserveAllowance(player, click) : Integer.MAX_VALUE;
         if (reserveAllowance <= 0) {
             return this.finish(click, SendResult.RESERVE_LIMIT);
         }
@@ -192,38 +222,47 @@ public class ActionManager {
         } else {
             direction = DirectionUtils.getHorizontalDirection(look.yaw);
         }
-        Vec3 hitVec;
-        if (!click.useProtocol) {
-            Vec3 targetCenter = Vec3.atCenterOf(click.target);
-            Vec3 sideOffset = Vec3.atLowerCornerOf(DirectionUtils.getVector(click.side)).scale(0.5);
-            Vec3 rotatedHitModifier = click.hitModifier.yRot((direction.toYRot() + 90) % 360).scale(0.5);
-            hitVec = targetCenter.add(sideOffset).add(rotatedHitModifier);
-        } else {
-            hitVec = click.hitModifier;
-        }
-        QuickShulkerBridge.onMainHandUse(player);
+        Vec3 targetCenter = Vec3.atCenterOf(click.target);
+        Vec3 sideOffset = Vec3.atLowerCornerOf(DirectionUtils.getVector(click.side)).scale(0.5);
+        Vec3 rotatedHitModifier = click.physicalHitModifier.yRot((direction.toYRot() + 90) % 360).scale(0.5);
+        Vec3 physicalHitVec = targetCenter.add(sideOffset).add(rotatedHitModifier);
+        Vec3 hitVec = click.useProtocol ? click.hitModifier : physicalHitVec;
+        if (click.warehouseTarget == null) QuickShulkerBridge.onMainHandUse(player);
         boolean wasSneak = player.isShiftKeyDown();
         if (click.useShift && !wasSneak) {
             setShift(player, true);
         } else if (!click.useShift && wasSneak) {
             setShift(player, false);
         }
+        if (click.warehouseTarget != null) {
+            boolean sent;
+            try {
+                // Preserve queue look/sneak ordering, but never predict an inventory-backed use.
+                BlockHitResult physicalHit = new BlockHitResult(physicalHitVec, click.side, click.target, false);
+                sent = click.warehouseDesiredState == null
+                        ? this.sendWarehousePlacement(click.expectedItems, click.warehouseTarget,
+                                physicalHit, click.warehouseExpectedStateId)
+                        : this.sendWarehouseStatePlacement(click.expectedItems, click.warehouseTarget,
+                                physicalHit, click.warehouseExpectedStateId, click.warehouseDesiredState);
+            } finally {
+                restoreShift(player, click, wasSneak);
+            }
+            return this.finish(click, sent ? SendResult.SENT : SendResult.INTERACTION_REJECTED);
+        }
         if (!(Reference.MINECRAFT.gameMode instanceof MultiPlayerGameModeExtension gameModeExtension)) {
             restoreShift(player, click, wasSneak);
             return this.finish(click, SendResult.NO_GAME_MODE);
         }
 
-        boolean accepted = false;
+        boolean dispatched = false;
         this.printerInteractionActive = true;
         this.easyPlaceProtocolActive = click.useProtocol;
         this.activeEasyPlacePolicy = click.policy.easyPlaceProtocol();
         boolean litematicaEasyPlaceWasHandling = false;
-        //#if MC > 12100
         litematicaEasyPlaceWasHandling = EasyPlaceUtils.isHandling();
         if (!litematicaEasyPlaceWasHandling) {
             EasyPlaceUtils.setHandling(true);
         }
-        //#endif
         try {
             BlockHitResult blockHitResult = new BlockHitResult(hitVec, click.side, click.target, false);
             for (int i = 0; i < click.repeatCount; i++) {
@@ -232,31 +271,51 @@ public class ActionManager {
                 }
                 me.aleksilassila.litematica.printer.integration.quickshulker.QuickShulkerDiagnostics.placement(
                         player, click.target, click.side, click.expectedItems);
-                boolean interactionAccepted = gameModeExtension.litematica_printer$useItemOn(
-                        true,
-                        InteractionHand.MAIN_HAND,
-                        blockHitResult
-                ) != net.minecraft.world.InteractionResult.FAIL;
-                accepted |= interactionAccepted;
+                boolean interactionAccepted;
+                boolean interactionDispatched;
+                if (click.waterSurfacePlacement) {
+                    if (!me.aleksilassila.litematica.printer.utils.minecraft.WaterSurfacePlacement.canPlace(
+                            player, Reference.MINECRAFT.level, click.target, this.look)) break;
+                    try (var send = NetworkUtils.trackUseItem(player.connection.getConnection(), InteractionHand.MAIN_HAND)) {
+                        interactionAccepted = gameModeExtension.litematica_printer$useItem(InteractionHand.MAIN_HAND, this.look)
+                                != net.minecraft.world.InteractionResult.FAIL;
+                        interactionDispatched = interactionAccepted || send.wasSent();
+                    }
+                } else try (var send = NetworkUtils.trackUseItemOn(
+                        player.connection.getConnection(), InteractionHand.MAIN_HAND, blockHitResult)) {
+                    interactionAccepted = gameModeExtension.litematica_printer$useItemOn(
+                            true, InteractionHand.MAIN_HAND, blockHitResult) != net.minecraft.world.InteractionResult.FAIL;
+                    // Vanilla may send USE even when its local prediction returns FAIL.
+                    interactionDispatched = interactionAccepted || send.wasSent();
+                }
+                dispatched |= interactionDispatched;
                 if (interactionAccepted) {
                     this.armTaskAnvilScreenSuppression(click);
                 }
-                if (interactionAccepted && reserveAllowance != Integer.MAX_VALUE) {
+                if (interactionDispatched && reserveAllowance != Integer.MAX_VALUE) {
                     reserveAllowance--;
                 }
             }
         } finally {
-            //#if MC > 12100
             if (!litematicaEasyPlaceWasHandling) {
                 EasyPlaceUtils.setHandling(false);
             }
-            //#endif
             this.printerInteractionActive = false;
             this.easyPlaceProtocolActive = false;
             this.activeEasyPlacePolicy = false;
             restoreShift(player, click, wasSneak);
         }
-        return this.finish(click, accepted ? SendResult.SENT : SendResult.INTERACTION_REJECTED);
+        return this.finish(click, dispatched ? SendResult.SENT : SendResult.INTERACTION_REJECTED);
+    }
+
+    protected boolean sendWarehousePlacement(Item[] candidates, BlockPos target, BlockHitResult hit, int expectedStateId) {
+        return VoidWarehousePlacementNetwork.requestPlace(candidates, target, hit, expectedStateId);
+    }
+
+    protected boolean sendWarehouseStatePlacement(Item[] candidates, BlockPos target,
+            BlockHitResult physicalHit, int expectedStateId, BlockState desiredState) {
+        return VoidWarehousePlacementNetwork.requestStatePlace(
+                candidates, target, physicalHit, expectedStateId, desiredState);
     }
 
     private void armTaskAnvilScreenSuppression(QueuedClick click) {
@@ -349,12 +408,8 @@ public class ActionManager {
     }
 
     public void setShift(LocalPlayer player, boolean shift) {
-        //#if MC > 12105
         Input input = new Input(player.input.keyPresses.forward(), player.input.keyPresses.backward(), player.input.keyPresses.left(), player.input.keyPresses.right(), player.input.keyPresses.jump(), shift, player.input.keyPresses.sprint());
         ServerboundPlayerInputPacket packet = new ServerboundPlayerInputPacket(input);
-        //#else
-        //$$ ServerboundPlayerCommandPacket packet = new ServerboundPlayerCommandPacket(player, shift ? ServerboundPlayerCommandPacket.Action.PRESS_SHIFT_KEY : ServerboundPlayerCommandPacket.Action.RELEASE_SHIFT_KEY);
-        //#endif
         player.setShiftKeyDown(shift);
         NetworkUtils.sendPacket(packet);
     }
@@ -391,14 +446,23 @@ public class ActionManager {
     }
 
     private static boolean isHoldingExpectedItem(LocalPlayer player, QueuedClick click) {
+        ItemStack mainHand = player.getMainHandItem();
+        // 🔴 最后一米的硬闸：改名成「虚空仓库」的工作台，右键会被服务端接管成「打开仓库界面」，
+        // 方块永远放不下。不管这条点击是谁排的队，一律不许用它右键 —— 否则就是
+        // 「右键 → 弹界面 → 方块没放下 → 下一 tick 再右键」的死循环（玩家按 Esc 也退不掉）。
+        // 这里返回 false 只会让这一击被丢弃（HELD_ITEM_CHANGED），下一次放置会走材料选择，
+        // 那时它已经被判成「不是建材」，于是转去补货要一个干净的工作台。
+        if (VoidWarehouseTriggerItem.isTrigger(mainHand)) {
+            return false;
+        }
         if (click.expectedStackPredicate != null
-                && !click.expectedStackPredicate.test(player.getMainHandItem())) {
+                && !click.expectedStackPredicate.test(mainHand)) {
             return false;
         }
         if (click.expectedItems == null || click.expectedItems.length == 0) {
             return true;
         }
-        Item heldItem = player.getMainHandItem().getItem();
+        Item heldItem = mainHand.getItem();
         for (Item expectedItem : click.expectedItems) {
             if (heldItem.equals(expectedItem)) {
                 return true;

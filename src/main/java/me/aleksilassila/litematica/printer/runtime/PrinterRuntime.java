@@ -14,8 +14,6 @@ import me.aleksilassila.litematica.printer.handler.InventoryAvailabilityTracker;
 import me.aleksilassila.litematica.printer.handler.HudStatsManager;
 import me.aleksilassila.litematica.printer.handler.scan.ScanEngine;
 import me.aleksilassila.litematica.printer.printer.ActionManager;
-import me.aleksilassila.litematica.printer.printer.RttReplayController;
-import me.aleksilassila.litematica.printer.printer.PlacementRateController;
 import me.aleksilassila.litematica.printer.printer.MissingMaterialTracker;
 import me.aleksilassila.litematica.printer.printer.action.ActionBroker;
 import me.aleksilassila.litematica.printer.utils.CooldownUtils;
@@ -35,10 +33,8 @@ import me.aleksilassila.litematica.printer.handler.handlers.bedrock.BedrockEngin
 import me.aleksilassila.litematica.printer.interaction.ToolSwitchService;
 import me.aleksilassila.litematica.printer.interaction.StrippableBlockPort;
 import me.aleksilassila.litematica.printer.integration.inventory.StrippableBlockAdapter;
-//#if MC >= 12111
 import me.aleksilassila.litematica.printer.integration.voidwarehouse.VoidWarehouseRestockAdapter;
 import me.aleksilassila.litematica.printer.integration.voidwarehouse.VoidWarehouseReturnController;
-//#endif
 import net.minecraft.client.Minecraft;
 import me.aleksilassila.litematica.printer.config.Configs;
 import me.aleksilassila.litematica.printer.guide.guides.RailGuide;
@@ -70,10 +66,9 @@ public final class PrinterRuntime {
     private final InventoryAvailabilityTracker inventoryAvailability;
     private final CooldownUtils cooldownUtils;
     private final InteractionUtils interactionUtils;
-    private final RttReplayController rttReplayController;
-    private final PlacementRateController placementRateController;
     private final MissingMaterialTracker missingMaterials;
     private final HudStatsManager hudStats;
+    private final me.aleksilassila.litematica.printer.render.OperationHighlights operationHighlights;
     private final QuickShulkerAdapter quickShulkerAdapter;
     private final ChestTrackerAdapter chestTrackerAdapter;
     private final InventorySwitchGuard inventorySwitchGuard;
@@ -83,13 +78,13 @@ public final class PrinterRuntime {
     private final ToolSwitchService toolSwitchService;
     private final StrippableBlockPort strippableBlocks;
     private final me.aleksilassila.litematica.printer.integration.containersync.ContainerSyncController containerSync;
-    //#if MC >= 12111
     /** 虚空仓库返还：补货多给的整组材料用不完时退回去，避免材料种类多时背包被占满。 */
     private final VoidWarehouseReturnController warehouseReturn;
-    //#endif
 
     public PrinterRuntime() {
         Minecraft client = Minecraft.getInstance();
+        this.operationHighlights = new me.aleksilassila.litematica.printer.render.OperationHighlights();
+        this.scope.register(this.operationHighlights);
         this.scope.register(this.diagnostics);
         this.cooldownUtils = new CooldownUtils();
         this.scope.register(this.cooldownUtils);
@@ -104,6 +99,11 @@ public final class PrinterRuntime {
         this.scope.register(new InventorySwitchRuntime(this.inventorySwitchGuard));
         this.tweakeroo = new TweakerooAdapter();
         this.toolSwitchService = new ToolSwitchService(client, this.tweakeroo, this.inventorySwitchGuard);
+        this.events.subscribe(event -> {
+            if (event instanceof RuntimeEvent.InventorySynchronized synchronizedInventory) {
+                this.toolSwitchService.onInventorySynchronized(synchronizedInventory.connection());
+            }
+        });
         this.strippableBlocks = new StrippableBlockAdapter();
         this.inventoryMessageCooldown = new InventoryMessageCooldown();
         this.scope.register(this.inventoryMessageCooldown);
@@ -113,13 +113,9 @@ public final class PrinterRuntime {
         this.scope.register(this.inventoryAvailability);
         this.interactionUtils = new InteractionUtils();
         this.scope.register(this.interactionUtils);
-        this.rttReplayController = new RttReplayController();
-        this.scope.register(this.rttReplayController);
-        this.placementRateController = new PlacementRateController(this.rttReplayController);
-        this.scope.register(this.placementRateController);
         this.missingMaterials = new MissingMaterialTracker();
         this.scope.register(this.missingMaterials);
-        this.hudStats = new HudStatsManager(client, this::currentTick, this.rttReplayController);
+        this.hudStats = new HudStatsManager(client, this::currentTick);
         this.scope.register(this.hudStats);
         this.quickShulkerAdapter = new QuickShulkerAdapter(this.actionBroker);
         this.scope.register(this.quickShulkerAdapter);
@@ -127,7 +123,6 @@ public final class PrinterRuntime {
         this.scope.register(this.chestTrackerAdapter);
         this.containerSync = new me.aleksilassila.litematica.printer.integration.containersync.ContainerSyncController(this);
         this.scope.register(this.containerSync);
-        //#if MC >= 12111
         // 必须晚于 inventorySwitchGuard（两个 supplier 都会用到它）。
         // 独立组件而不是塞进 containerSync：那条路要开潜影盒、占容器与主手租约，
         // 这条只发一个包、什么都不占，时序上不相容，混在一起只会互相踩状态。
@@ -137,7 +132,6 @@ public final class PrinterRuntime {
                 this.inventorySwitchGuard::isWaiting,
                 this::warehouseRequestedItems);
         this.scope.register(this.warehouseReturn);
-        //#endif
         this.modules = new FeatureModuleSet(this);
     }
 
@@ -187,20 +181,16 @@ public final class PrinterRuntime {
         return this.interactionUtils;
     }
 
-    public RttReplayController rttReplayController() {
-        return this.rttReplayController;
-    }
-
-    public PlacementRateController placementRateController() {
-        return this.placementRateController;
-    }
-
     public MissingMaterialTracker missingMaterials() {
         return this.missingMaterials;
     }
 
     public HudStatsManager hudStats() {
         return this.hudStats;
+    }
+
+    public me.aleksilassila.litematica.printer.render.OperationHighlights operationHighlights() {
+        return this.operationHighlights;
     }
 
     public QuickShulkerAdapter quickShulkerAdapter() {
@@ -250,11 +240,9 @@ public final class PrinterRuntime {
             List<InventoryProvider> providers = new ArrayList<>();
             providers.add(new PlayerInventoryProvider(Minecraft.getInstance()));
             providers.add(new TakeItOutAdapter(this.actionBroker));
-            //#if MC >= 12111
             VoidWarehouseRestockAdapter warehouseRestock = new VoidWarehouseRestockAdapter(this.actionBroker);
             warehouseRestock.attachReturnController(this.warehouseReturn);
             providers.add(warehouseRestock);
-            //#endif
             providers.add(this.quickShulkerAdapter);
             providers.add(this.chestTrackerAdapter);
             this.materialRequests = new MaterialRequestCoordinator(List.copyOf(providers));
@@ -263,7 +251,6 @@ public final class PrinterRuntime {
         return this.materialRequests;
     }
 
-    //#if MC >= 12111
     /**
      * 打印机现在算不算「在干活」。
      *
@@ -287,7 +274,6 @@ public final class PrinterRuntime {
         }
         return this.materialRequests.activeItems();
     }
-    //#endif
 
     public void tick(Minecraft client) {
         long tickStart = this.diagnostics.tickStarted();
@@ -324,10 +310,20 @@ public final class PrinterRuntime {
                 this.timing.finish("runtime", Stage.MINING_TICK, miningStart);
             }
             this.modules.tick();
-            //#if MC >= 12111
+            if (Configs.Highlight.ENABLED.getBooleanValue()) {
+                var previews = new java.util.ArrayList<me.aleksilassila.litematica.printer.render.OperationHighlights.Preview>();
+                if (Configs.Highlight.NEXT_ENABLED.getBooleanValue()) {
+                    for (var module : this.modules.values()) {
+                        var preview = module.nextIterationPreview();
+                        if (preview != null) previews.add(preview);
+                    }
+                }
+                this.operationHighlights.setPreviews(previews);
+            } else {
+                this.operationHighlights.clear();
+            }
             // 放在最后：这一 tick 的取料/放置都已结算，看到的是背包的最终状态。
             this.warehouseReturn.tick();
-            //#endif
         } finally {
             this.diagnostics.tickCompleted(this.epoch, tickStart);
         }

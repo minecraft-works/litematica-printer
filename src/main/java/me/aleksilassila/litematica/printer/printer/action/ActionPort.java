@@ -7,12 +7,14 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.EnumSet;
 import java.util.function.Consumer;
+import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 
 /** Feature-facing action capability, independent of the queue implementation. */
@@ -20,7 +22,7 @@ public interface ActionPort {
     enum ActionSource { GENERIC, PRINT, FILL, COVER, FLUID, MINE }
 
     enum SendResult {
-        /** The local interaction did not return FAIL; this does not confirm a server world update. */
+        /** The interaction was accepted locally or its use packet was submitted; server confirmation is separate. */
         SENT,
         WAITING_FOR_LOOK,
         NO_QUEUED_ACTION,
@@ -48,9 +50,19 @@ public interface ActionPort {
 
     void useProtocolHitModifier(@NotNull Vec3 hitModifier);
 
+    default boolean setWaterSurfacePlacement() { return false; }
+
     boolean setQueueCompletionListener(@Nullable Consumer<SendResult> completionListener);
 
+    /** Rechecks feature-owned work immediately before a deferred interaction is sent. */
+    default boolean setQueueValidity(BooleanSupplier validity) { return false; }
+
     boolean setExpectedStackPredicate(@Nullable Predicate<ItemStack> expectedStackPredicate);
+
+    /** Marks an ordinary block placement to use warehouse stock instead of the held stack. */
+    default boolean setWarehousePlacement(BlockPos target, int expectedStateId) { return false; }
+
+    default boolean setWarehouseStatePlacement(BlockPos target, int expectedStateId, BlockState desiredState) { return false; }
 
     SendResult sendQueue(@Nullable LocalPlayer player);
 

@@ -8,7 +8,6 @@ import me.aleksilassila.litematica.printer.mixin.printer.litematica.InventoryUti
 import me.aleksilassila.litematica.printer.integration.inventory.MaterialRequest;
 import me.aleksilassila.litematica.printer.integration.litematica.LitematicaPickSlotAdapter;
 import me.aleksilassila.litematica.printer.utils.minecraft.PlayerUtils;
-import me.aleksilassila.litematica.printer.utils.minecraft.ToolSelectionUtils;
 import me.aleksilassila.litematica.printer.utils.mods.QuickShulkerBridge;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientPacketListener;
@@ -22,7 +21,6 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.state.BlockState;
 import org.jetbrains.annotations.Nullable;
 
@@ -37,27 +35,15 @@ public class InventoryUtils {
     private static final Minecraft client = Minecraft.getInstance();
     private static final int OFFHAND_SLOT_INDEX = 40;
     public static int getSelectedSlot(Inventory inventory) {
-        //#if MC > 12104
         return inventory.getSelectedSlot();
-        //#else
-        //$$ return inventory.selected;
-        //#endif
     }
 
     public static void setSelectedSlot(Inventory inventory, int slot) {
-        //#if MC > 12101
         inventory.setSelectedSlot(slot);
-        //#else
-        //$$ inventory.selected = slot;
-        //#endif
     }
 
     public static NonNullList<ItemStack> getMainStacks(Inventory inventory) {
-        //#if MC > 12104
         return inventory.getNonEquipmentItems();
-        //#else
-        //$$ return inventory.items;
-        //#endif
     }
 
     public static boolean playerHasAccessToItem(LocalPlayer playerEntity, Item item) {
@@ -65,11 +51,17 @@ public class InventoryUtils {
     }
 
     public static boolean playerHasItemInInventory(LocalPlayer playerEntity, Item item) {
-        return playerHasItemInInventory(playerEntity, item, stack -> true);
+        return playerHasItemInInventory(playerEntity, item, VoidWarehouseTriggerItem::isUsableAsMaterial);
     }
 
     public static boolean playerHasItemInInventory(LocalPlayer playerEntity, Item item,
                                                     java.util.function.Predicate<ItemStack> predicate) {
+        return playerHasItemInInventory(playerEntity, item, predicate, 1);
+    }
+
+    public static boolean playerHasItemInInventory(LocalPlayer playerEntity, Item item,
+                                                    java.util.function.Predicate<ItemStack> predicate,
+                                                    int minimumCount) {
         if (playerEntity == null || item == null) {
             return false;
         }
@@ -77,9 +69,12 @@ public class InventoryUtils {
             return true;
         }
         Inventory inventory = playerEntity.getInventory();
+        int count = 0;
         for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
-            if (inventory.getItem(slot).is(item) && predicate.test(inventory.getItem(slot))) {
-                return true;
+            ItemStack stack = inventory.getItem(slot);
+            if (stack.is(item) && predicate.test(stack)) {
+                count += stack.getCount();
+                if (count >= minimumCount) return true;
             }
         }
         return false;
@@ -92,7 +87,9 @@ public class InventoryUtils {
         if (!playerEntity.containerMenu.equals(playerEntity.inventoryMenu)) return false;
         Inventory inventory = playerEntity.getInventory();
         for (int i = 0; i < inventory.getContainerSize(); i++) {
-            Item inventoryItem = inventory.getItem(i).getItem();
+            ItemStack stack = inventory.getItem(i);
+            if (VoidWarehouseTriggerItem.isTrigger(stack)) continue;
+            Item inventoryItem = stack.getItem();
             for (Item item : items) {
                 if (inventoryItem == item) {
                     return true;
@@ -123,36 +120,6 @@ public class InventoryUtils {
         connection.send(new ServerboundSetCarriedItemPacket(getSelectedSlot(player.getInventory())));
     }
 
-    /**
-     * 检查是否有可用的 Pick 槽位
-     *
-     * @param sourceSlot 源槽位（-1表示自动寻找）
-     * @param mc         Minecraft实例
-     * @return PickResult 枚举结果
-     */
-    public static PickResult checkPickSlotAvailable(int sourceSlot, Minecraft mc) {
-        // 基础校验失败 → 返回通用FAIL
-        if (mc.player == null) return PickResult.FAIL;
-        Player player = mc.player;
-        Inventory inventory = player.getInventory();
-        // 源槽位是快捷栏 → 成功
-        if (Inventory.isHotbarSlot(sourceSlot)) return PickResult.SUCCESS;
-        // 无配置可拾取槽位 → 精准失败类型
-        if (InventoryUtilsAccessor.getPICK_BLOCKABLE_SLOTS().isEmpty()) {
-            return PickResult.FAIL_NO_PICK_SLOTS_CONFIGURED;
-        }
-        // 寻找可用槽位
-        int hotbarSlot = sourceSlot;
-        if (sourceSlot == -1 || !Inventory.isHotbarSlot(sourceSlot)) {
-            hotbarSlot = InventoryUtilsAccessor.getEmptyPickBlockableHotbarSlot(inventory);
-        }
-        if (hotbarSlot == -1) {
-            hotbarSlot = LitematicaPickSlotAdapter.selectNextAvailable(player);
-        }
-        // 无可用槽位 → 精准失败类型；否则成功
-        return hotbarSlot != -1 ? PickResult.SUCCESS : PickResult.FAIL_NO_SUITABLE_SLOT_FOUND;
-    }
-
     public static boolean setPickedItemToHand(int sourceSlot, ItemStack stack, Minecraft mc) {
         if (mc.player == null) return false;
         Player player = mc.player;
@@ -162,6 +129,9 @@ public class InventoryUtils {
             setHotbarSlot(sourceSlot, inventory);
             return true;
         }
+        // A window-0 inventory swap is discarded while another menu is active. Do not
+        // change the selected slot or claim success for a click vanilla will ignore.
+        if (player.containerMenu != player.inventoryMenu) return false;
         if (InventoryUtilsAccessor.getPICK_BLOCKABLE_SLOTS().isEmpty()) {
             showMessageWithCooldown(Message.MessageType.WARNING, "litematica.message.warn.pickblock.no_valid_slots_configured");
             return false;
@@ -192,13 +162,9 @@ public class InventoryUtils {
 
     public static boolean swapItemToMainHand(ItemStack stackReference, Minecraft mc) {
         Player player = mc.player;
-        if (player == null) return false;
+        if (player == null || player.containerMenu != player.inventoryMenu) return false;
 
-        //#if MC > 12004
-        boolean b = areStacksEqualIgnoreNbt(stackReference, player.getMainHandItem());
-        //#else
-        //$$ boolean b = areStacksEqual(stackReference, player.getMainHandItem());
-        //#endif
+        boolean b = !VoidWarehouseTriggerItem.isTrigger(player.getMainHandItem()) && ItemStack.isSameItemSameComponents(stackReference, player.getMainHandItem());
         if (b) {
             return false;
         }
@@ -215,12 +181,7 @@ public class InventoryUtils {
         return false;
     }
 
-    /**
-     * 获取玩家副手的物品栈（全版本通用，极简实现）
-     *
-     * @param player 玩家实例
-     * @return 副手物品栈
-     */
+    /** 获取玩家副手的物品栈。 */
     public static ItemStack getOffhandStack(Player player) {
         // 直接通过固定槽位40获取，无版本专属字段依赖
         return player.getInventory().getItem(OFFHAND_SLOT_INDEX);
@@ -241,6 +202,9 @@ public class InventoryUtils {
         boolean isAlreadyInOffhand = areStacksEqual(stack, getOffhandStack(player));
         if (isAlreadyInOffhand) {
             return true;
+        }
+        if (player.containerMenu != player.inventoryMenu) {
+            return false;
         }
 
         // 2. 创造模式：直接设置副手物品（无需交换）
@@ -292,18 +256,6 @@ public class InventoryUtils {
         return ToolInventorySelector.switchToBestTool(client, player, blockState, client.level, pos);
     }
 
-    public static boolean hasUsableSilkTouchTool(LocalPlayer player) {
-        if (player == null || PlayerUtils.getAbilities(player).instabuild) {
-            return false;
-        }
-        for (ItemStack stack : getMainStacks(player.getInventory())) {
-            if (!stack.isEmpty() && ToolSelectionUtils.hasSilkTouch(stack)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     public static boolean switchToItems(LocalPlayer player, Item[] items) {
         return switchToItems(player, items, -1);
     }
@@ -337,7 +289,7 @@ public class InventoryUtils {
         Inventory inventory = playerEntity.getInventory();
         for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
             ItemStack stack = inventory.getItem(slot);
-            if (!stack.isEmpty() && predicate.test(stack)) {
+            if (!stack.isEmpty() && VoidWarehouseTriggerItem.isUsableAsMaterial(stack) && predicate.test(stack)) {
                 return true;
             }
         }
@@ -349,6 +301,7 @@ public class InventoryUtils {
             return true;
         }
         Item heldItem = player.getMainHandItem().getItem();
+        if (VoidWarehouseTriggerItem.isTrigger(player.getMainHandItem())) return false;
         for (Item item : items) {
             if (heldItem.equals(item)) {
                 return true;
@@ -405,30 +358,4 @@ public class InventoryUtils {
         return MaterialSelector.findReserveBlockedStack(player, items, requiredStackPredicate, reserveCount);
     }
 
-    public enum PickResult {
-        SUCCESS,
-        FAIL,
-        FAIL_NO_PICK_SLOTS_CONFIGURED,
-        FAIL_NO_SUITABLE_SLOT_FOUND;
-
-        // 快捷判断：是否是「未配置可拾取槽位」
-        public boolean isNoPickSlotsConfigured() {
-            return this == FAIL_NO_PICK_SLOTS_CONFIGURED;
-        }
-
-        // 快捷判断：是否是「无可用槽位」
-        public boolean isNoSuitableSlotFound() {
-            return this == FAIL_NO_SUITABLE_SLOT_FOUND;
-        }
-
-        // 快捷方法：是否「无可用槽位」（包含两种精准失败类型）
-        public boolean isNoAvailableSlot() {
-            return isNoPickSlotsConfigured() || isNoSuitableSlotFound();
-        }
-
-        // 快捷方法：是否「有可用槽位」（仅SUCCESS表示有）
-        public boolean isAvailable() {
-            return this == SUCCESS;
-        }
-    }
 }

@@ -18,11 +18,13 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.function.Consumer;
+import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 import java.util.EnumSet;
 import java.util.Optional;
@@ -44,6 +46,7 @@ public final class ActionBroker implements RuntimeComponent, ActionPort {
     private final ActionCoordinator coordinator = new ActionCoordinator();
     private ActionTicket activeTicket;
     private FeatureLifecycle.Work activeWork;
+    @Nullable private BooleanSupplier queueValidity;
 
     private static SendResult from(ActionManager.SendResult result) {
         return SendResult.valueOf(result.name());
@@ -109,20 +112,40 @@ public final class ActionBroker implements RuntimeComponent, ActionPort {
         this.delegate.useProtocolHitModifier(hitModifier);
     }
 
+    @Override public boolean setWaterSurfacePlacement() {
+        return this.activeTicket != null && this.delegate.setWaterSurfacePlacement();
+    }
+
     public boolean setQueueCompletionListener(@Nullable Consumer<SendResult> completionListener) {
         return this.delegate.setQueueCompletionListener(
                 completionListener == null ? null : result -> completionListener.accept(from(result))
         );
     }
 
+    @Override
+    public boolean setQueueValidity(BooleanSupplier validity) {
+        if (this.activeTicket == null) return false;
+        this.queueValidity = validity;
+        return true;
+    }
+
     public boolean setExpectedStackPredicate(@Nullable Predicate<ItemStack> expectedStackPredicate) {
         return this.delegate.setExpectedStackPredicate(expectedStackPredicate);
+    }
+
+    public boolean setWarehousePlacement(BlockPos target, int expectedStateId) {
+        return this.delegate.setWarehousePlacement(target, expectedStateId);
+    }
+
+    public boolean setWarehouseStatePlacement(BlockPos target, int expectedStateId, BlockState desiredState) {
+        return this.delegate.setWarehouseStatePlacement(target, expectedStateId, desiredState);
     }
 
     public SendResult sendQueue(@Nullable LocalPlayer player) {
         if (this.activeTicket != null) {
             if (!this.activeTicket.canSend(this.epoch.get(), System.nanoTime())
-                    || !this.lifecycle.get().canSend(this.activeWork, this.epoch.get())) {
+                    || !this.lifecycle.get().canSend(this.activeWork, this.epoch.get())
+                    || this.queueValidity != null && !this.queueValidity.getAsBoolean()) {
                 this.delegate.cancelQueue();
                 this.releaseActiveTicket();
                 return SendResult.NO_QUEUED_ACTION;
@@ -210,6 +233,7 @@ public final class ActionBroker implements RuntimeComponent, ActionPort {
         this.delegate.resetRuntime();
         this.activeTicket = null;
         this.activeWork = null;
+        this.queueValidity = null;
         this.coordinator.reset();
     }
 
@@ -242,6 +266,7 @@ public final class ActionBroker implements RuntimeComponent, ActionPort {
     }
 
     private void releaseActiveTicket() {
+        this.queueValidity = null;
         if (this.activeTicket != null) {
             this.coordinator.release(this.activeTicket);
             this.activeTicket = null;

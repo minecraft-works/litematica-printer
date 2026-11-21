@@ -1,6 +1,5 @@
 import org.gradle.api.Plugin
 import org.gradle.api.Project
-import org.gradle.api.JavaVersion
 import org.gradle.api.file.DuplicatesStrategy
 import org.gradle.api.plugins.BasePluginExtension
 import org.gradle.api.plugins.JavaPluginExtension
@@ -108,27 +107,48 @@ abstract class ModPlugin : Plugin<Project> {
                     "-Xlint:unchecked"
                 )
             )
-            if (javaVersion <= JavaVersion.VERSION_1_8) {
-                options.compilerArgs.add("-Xlint:-options")
-            }
         }
     }
 
     private fun Project.configureTestWorkers() {
         tasks.withType<Test>().configureEach {
-            // Java 25 warns when legacy Guava/JOML code uses Unsafe. Keep the
-            // compatibility access enabled only on runtimes that support this
-            // switch; older Java versions must not receive an unknown option.
-            if (Runtime.version().feature() >= 23) {
-                jvmArgs("--sun-misc-unsafe-memory-access=allow")
-            }
+            // Keep the test-only JIT safeguards below without printing each compiler command.
+            jvmArgs("-XX:CompileCommand=quiet")
+            // Bedrock fixtures swap the cached final CLIENT via Unsafe. Keep this tiny reader
+            // interpreted so JIT constant folding cannot retain a previous test's inventory.
+            jvmArgs("-XX:CompileCommand=exclude,me.aleksilassila.litematica.printer.handler.handlers.bedrock.BedrockInventory::count")
+            // Range fixtures also replace a cached final client. A compiled reader can retain
+            // the initial null across fixtures even after Unsafe installs the current client.
+            jvmArgs("-XX:CompileCommand=exclude,me.aleksilassila.litematica.printer.utils.minecraft.PlayerUtils::isWithinWorkInteractedEuclideanRange")
+            jvmArgs("-XX:CompileCommand=exclude,me.aleksilassila.litematica.printer.utils.minecraft.PlayerUtils::isWithinWorkInteractedCubeRange")
+            jvmArgs("-XX:CompileCommand=exclude,me.aleksilassila.litematica.printer.utils.minecraft.PlayerUtils::isWithinWorkInteractedManhattanRange")
+            jvmArgs("-XX:CompileCommand=exclude,me.aleksilassila.litematica.printer.utils.minecraft.PlayerUtils::getPlayerBlockInteractionRange")
+            // The bedrock interaction gate reads ConfigUtils' replaced final client too;
+            // hot cleanup scans must not bind the next fixture to the previous player.
+            jvmArgs("-XX:CompileCommand=exclude,me.aleksilassila.litematica.printer.handler.handlers.bedrock.BedrockRangePolicy::canInteract")
+            // Packet fixtures replace the same final client; a hot factory can otherwise
+            // inline the bootstrap null instead of the current fixture's connection.
+            jvmArgs("-XX:CompileCommand=exclude,me.aleksilassila.litematica.printer.utils.minecraft.NetworkUtils::createPacket")
+            // The larger survival matrix also warms the final send overloads after fixture client swaps.
+            jvmArgs("-XX:CompileCommand=exclude,me.aleksilassila.litematica.printer.utils.minecraft.NetworkUtils::sendPacket")
+            // Pending queries share the same Unsafe-replaced final client in queue/rail fixtures.
+            jvmArgs("-XX:CompileCommand=exclude,me.aleksilassila.litematica.printer.utils.InteractionUtils::isPendingDelayedDestroy")
+            // Print fixtures replace ConfigUtils' final client; a hot inherited read must not
+            // bind a later schematic context to an earlier fixture's player and inventory.
+            jvmArgs("-XX:CompileCommand=exclude,me.aleksilassila.litematica.printer.handler.handlers.PrintHandler::canIterationBlockPos")
+            // Batch routing reads that same final cache. Keep fixture packets on the
+            // currently installed connection instead of one retained by compiled code.
+            jvmArgs("-XX:CompileCommand=exclude,me.aleksilassila.litematica.printer.utils.minecraft.NetworkUtils::canSendPacketBatch")
+            jvmArgs("-XX:CompileCommand=exclude,me.aleksilassila.litematica.printer.utils.minecraft.NetworkUtils::sendPacketBatch")
+            // Test fixtures and third-party libraries use Unsafe on Java 25.
+            jvmArgs("--sun-misc-unsafe-memory-access=allow")
         }
     }
 
     private fun Project.configureResources() {
         tasks.withType<ProcessResources>().configureEach {
             inputs.properties(placeholderProps)
-            filesMatching(listOf("*.mixins.json", "*.mod.json", "META-INF/*mods.toml")) {
+            filesMatching(listOf("*.mixins.json", "*.mod.json")) {
                 expand(placeholderProps)
             }
         }
@@ -136,10 +156,8 @@ abstract class ModPlugin : Plugin<Project> {
 
     private fun Project.configureJar() {
         tasks.withType<Jar>().configureEach {
-            from(rootProject.file("LICENSE")) {
-                rename { originalName ->
-                    "${originalName}_${modArchivesBaseName}"
-                }
+            from(rootProject.file("LICENSE.md")) {
+                rename { "LICENSE_${modArchivesBaseName}" }
             }
             duplicatesStrategy = DuplicatesStrategy.EXCLUDE
             manifest {
@@ -287,14 +305,15 @@ abstract class ModPlugin : Plugin<Project> {
                                 }
 
                                 val tweakerooCompatibilityAdapter = relative.endsWith("/utils/mods/TweakerooUtils.java")
-                                if (!tweakerooCompatibilityAdapter && listOf(
+                                val miningDurabilityGuard = relative.endsWith("/interaction/MiningDurabilityGuard.java")
+                                if (!tweakerooCompatibilityAdapter && !miningDurabilityGuard && listOf(
                                         "switchToSafeTool",
                                         "getCurrentToolSafeBreakBudget",
                                         "protectCurrentToolBeforeBreak",
                                         "isToolAllowedByDurabilityProtection",
                                         "ITEM_SWAP_DURABILITY_THRESHOLD"
                                     ).any(text::contains)) {
-                                    violations += "$relative: local durability policy is forbidden; delegate to Tweakeroo"
+                                    violations += "$relative: durability policy must stay in MiningDurabilityGuard or the Tweakeroo compatibility adapter"
                                 }
 
                                 if (relative.endsWith("/guide/Guides.java")

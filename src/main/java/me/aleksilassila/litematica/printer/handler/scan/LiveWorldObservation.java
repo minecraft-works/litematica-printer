@@ -1,12 +1,14 @@
 package me.aleksilassila.litematica.printer.handler.scan;
 
 import fi.dy.masa.litematica.world.WorldSchematic;
+import fi.dy.masa.litematica.world.ChunkSchematicState;
 import me.aleksilassila.litematica.printer.utils.minecraft.BlockUtils;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import org.jetbrains.annotations.Nullable;
 
 /** Adapts live Minecraft and schematic worlds to the scan observation contract. */
@@ -36,15 +38,35 @@ final class LiveWorldObservation implements WorldObservationPort {
             boolean breakExtraBlocks
     ) {
         if (!this.level.hasChunk(chunkX, chunkZ)) return false;
-        return intent != ScanIntent.PRINT
-                || breakExtraBlocks
-                || this.schematic == null
-                || !this.schematic.getChunk(chunkX, chunkZ).isEmpty();
+        if (intent != ScanIntent.PRINT || this.schematic == null) return true;
+        var chunk = this.schematic.getChunk(chunkX, chunkZ);
+        return chunk.getState().atLeast(ChunkSchematicState.FILLED) && (breakExtraBlocks || !chunk.isEmpty());
     }
 
     @Override
     public BlockState worldState(BlockPos pos) {
         return this.level.getBlockState(pos);
+    }
+
+    @Override
+    public boolean hasCandidatesInSection(ScanIntent intent, int sectionX, int sectionY,
+                                          int sectionZ, boolean breakExtraBlocks) {
+        if (intent == ScanIntent.FLUID) {
+            var source = this.level.getChunkSource();
+            // Headless or incomplete observations are unknown, never proof of an empty section.
+            if (source == null) return true;
+            var chunk = source.getChunk(sectionX, sectionZ, ChunkStatus.FULL, false);
+            if (chunk == null) return false;
+            var sections = chunk.getSections();
+            int index = this.level.getSectionIndexFromSectionY(sectionY);
+            // The maintained fluid count includes both liquid blocks and waterlogged solids.
+            return index >= 0 && index < sections.length && sections[index] != null && sections[index].hasFluid();
+        }
+        if (intent != ScanIntent.PRINT || breakExtraBlocks || this.schematic == null) return true;
+        var chunk = this.schematic.getChunk(sectionX, sectionZ);
+        var sections = chunk.getSections();
+        int index = ((sectionY << 4) - this.schematic.getMinY()) >> 4;
+        return index >= 0 && index < sections.length && sections[index] != null && !sections[index].hasOnlyAir();
     }
 
     @Override

@@ -29,8 +29,7 @@ public final class QuickShulkerRequestController {
     private final QuickShulkerContainerSession containerSession = new QuickShulkerContainerSession();
     private int shulkerCooldown = 0;
     private int openHandlerTimeout = 0;
-    private static final int OPEN_HANDLER_BASE_TIMEOUT_TICKS = 8;
-    private static final int OPEN_HANDLER_SAFETY_TICKS = 2;
+    private static final int OPEN_HANDLER_TIMEOUT_TICKS = 10;
     private static final int OPEN_HANDLER_MAX_TIMEOUT_TICKS = 40;
 
     private final HashSet<Item> lastNeedItemList = new LinkedHashSet<>();
@@ -98,9 +97,6 @@ public final class QuickShulkerRequestController {
             }
 
             if (Configs.Placement.QUICK_SHULKER.getBooleanValue()) {
-                if (shulkerCooldown > 0) {
-                    return true;
-                }
                 if (this.openShulker(this.lastNeedItemList)) {
                     return true;
                 }
@@ -346,16 +342,13 @@ public final class QuickShulkerRequestController {
         orderedStorage.newItem(extractedStack, sourceShulker, extractionSlot,
                 shulkerInventoryMenuSlot, targetHotbarSlot);
         me.aleksilassila.litematica.printer.utils.InventoryUtils.setSelectedSlot(player.getInventory(), targetHotbarSlot);
+        // The swap is authoritative; ordered hotbar selection precedes subsequent interactions.
         me.aleksilassila.litematica.printer.utils.InventoryUtils.syncSelectedHotbarSlot();
-        RuntimeAccess.get().inventorySwitchGuard().markSwitchIfNeeded(extractedStack.getItem());
         closeAutomatedContainer();
         clearSwitchRequest();
     }
 
     private boolean openShulker(HashSet<Item> items) {
-        if (shulkerCooldown > 0) {
-            return false;
-        }
         Map<Integer, List<ItemStack>> decoded = items.size() > 1 ? new HashMap<>() : null;
         for (Item item : items) {
             AbstractContainerMenu sc = Minecraft.getInstance().player.inventoryMenu;
@@ -372,6 +365,8 @@ public final class QuickShulkerRequestController {
                             && (!this.emptyShulkerOnly || me.aleksilassila.litematica.printer.integration.inventory.MaterialRequest.isEmptyShulker(s1)))) {
                         // Recheck live inventory/configuration for every external opening attempt.
                         if (selectTarget(sc, i) == null) continue;
+                        // Cooldown limits opening, not a pure lookup that can release missing materials.
+                        if (shulkerCooldown > 0) return true;
                         try {
                             shulkerInventoryMenuSlot = i;
                             QuickShulkerDiagnostics.log("open-send source=" + i + " wanted=" + item
@@ -388,11 +383,7 @@ public final class QuickShulkerRequestController {
                             }
                             ModLoadUtils.closeScreen++;
                             this.isOpenHandler = true;
-                            openHandlerTimeout = RuntimeAccess.get().rttReplayController().getWaitTimeoutTicks(
-                                    OPEN_HANDLER_BASE_TIMEOUT_TICKS,
-                                    OPEN_HANDLER_SAFETY_TICKS,
-                                    OPEN_HANDLER_MAX_TIMEOUT_TICKS
-                            );
+                            openHandlerTimeout = OPEN_HANDLER_TIMEOUT_TICKS;
                             shulkerCooldown = Configs.Placement.QUICK_SHULKER_COOLDOWN.getIntegerValue();
                             return true;
                         } catch (Exception e) {

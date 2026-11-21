@@ -7,21 +7,17 @@ final class BedrockTargetState {
     private int stuckTicks;
     private int executeTick = -1;
     private int initializeTick = -1;
-    private boolean throughputConsumed;
+    private boolean initialExtensionObserved;
+    private BedrockPlacer.InitialRequest initialRequest;
     private BedrockTarget.Status status = BedrockTarget.Status.UNINITIALIZED;
+    private long lastAdvancedTick = Long.MIN_VALUE;
 
-    void beginTick(boolean allowExecute) {
-        this.throughputConsumed = false;
-        if (this.status != BedrockTarget.Status.UNINITIALIZED
-                && this.status != BedrockTarget.Status.EXTENDED) {
-            this.tickTimes++;
-        } else if (this.status == BedrockTarget.Status.EXTENDED && allowExecute) {
-            this.tickTimes++;
+    void beginTick(long now) {
+        if (this.lastAdvancedTick == now) return;
+        if (this.lastAdvancedTick != Long.MIN_VALUE && now > this.lastAdvancedTick) {
+            this.tickTimes += (int) Math.min(Integer.MAX_VALUE - this.tickTimes, now - this.lastAdvancedTick);
         }
-    }
-
-    void advanceStatusOnly() {
-        this.tickTimes++;
+        this.lastAdvancedTick = now;
     }
 
     void resetAttempt() {
@@ -30,6 +26,8 @@ final class BedrockTargetState {
         this.stuckTicks = 0;
         this.executeTick = -1;
         this.initializeTick = -1;
+        this.initialExtensionObserved = false;
+        this.initialRequest = null;
     }
 
     int tickTimes() {
@@ -38,6 +36,11 @@ final class BedrockTargetState {
 
     boolean hasTried() {
         return this.hasTried;
+    }
+
+    void markDispatched() {
+        this.hasTried = true;
+        this.executeTick = this.tickTimes;
     }
 
     void setHasTried(boolean value) {
@@ -66,7 +69,17 @@ final class BedrockTargetState {
 
     void setInitializeTick(int value) {
         this.initializeTick = value;
+        this.initialExtensionObserved = false;
+        this.initialRequest = null;
     }
+
+    boolean initialExtensionObserved() { return this.initialExtensionObserved; }
+
+    void observeInitialExtension() { this.initialExtensionObserved = true; }
+
+    BedrockPlacer.InitialRequest initialRequest() { return this.initialRequest; }
+
+    void setInitialRequest(BedrockPlacer.InitialRequest request) { this.initialRequest = request; }
 
     BedrockTarget.Status status() {
         return this.status;
@@ -76,11 +89,4 @@ final class BedrockTargetState {
         this.status = status;
     }
 
-    boolean consumedThroughput() {
-        return this.throughputConsumed;
-    }
-
-    void markThroughputAction() {
-        this.throughputConsumed = true;
-    }
 }

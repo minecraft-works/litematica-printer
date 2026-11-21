@@ -9,6 +9,7 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.LevelChunk;
 
 import java.util.List;
+import java.util.Comparator;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import me.aleksilassila.litematica.printer.core.runtime.RuntimeEpoch;
@@ -67,13 +68,8 @@ public final class ScanEngine implements RuntimeComponent {
             return;
         }
         ChunkPos pos = chunk.getPos();
-        //#if MC >= 260100
         int chunkX = pos.x();
         int chunkZ = pos.z();
-        //#else
-        //$$ int chunkX = pos.x;
-        //$$ int chunkZ = pos.z;
-        //#endif
         int minY = level.getMinY();
         this.cache.invalidateChunk(chunkX, chunkZ, minY, minY + level.getHeight() - 1);
     }
@@ -92,6 +88,23 @@ public final class ScanEngine implements RuntimeComponent {
 
     public void resetOwner(String ownerKey) {
         this.cache.resetOwner(ownerKey);
+    }
+
+    /** Returns temporary delivery ownership without invalidating reusable world facts. */
+    public void reoffer(String ownerKey, BlockPos pos) {
+        this.cache.reoffer(ownerKey, pos);
+    }
+
+    /** Snapshot of the next scan coordinate; does not advance or classify a block. */
+    public BlockPos peekPosition(String ownerKey) { return this.cache.peekPosition(ownerKey); }
+
+    /** The same fixed construction order used by this owner's scan source. */
+    public Comparator<BlockPos> targetComparator(String ownerKey) {
+        return this.cache.targetComparator(ownerKey);
+    }
+
+    public ScanWorkSlice openWorkSlice(String ownerKey) {
+        return this.cache.openWorkSlice(ownerKey);
     }
 
     public ScanCache.ScanMetrics metricsFor(String ownerKey) {

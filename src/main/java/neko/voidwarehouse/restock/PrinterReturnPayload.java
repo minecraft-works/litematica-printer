@@ -1,6 +1,5 @@
 package neko.voidwarehouse.restock;
 
-//#if MC >= 12111
 import io.netty.buffer.ByteBuf;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.codec.ByteBufCodecs;
@@ -53,7 +52,7 @@ public record PrinterReturnPayload(int nonce, List<Integer> slots) implements Cu
      *
      * <p>与 {@link PrinterTakePayload#CODEC} 同款写法：{@code list} 的类型参数必须显式写出
      * （{@code <ByteBuf, Integer>}），否则推断退化成 {@code Object} 编译不过；
-     * 结果保留成 {@code StreamCodec<ByteBuf, ...>} 以便同时喂给 26.3 与 1.21.11 的
+     * 结果保留成 {@code StreamCodec<ByteBuf, ...>} 以便喂给
      * {@code composite}（它的形参是 {@code StreamCodec<? super B, T>}）。</p>
      */
     private static final StreamCodec<ByteBuf, List<Integer>> SLOTS_CODEC =
@@ -70,4 +69,3 @@ public record PrinterReturnPayload(int nonce, List<Integer> slots) implements Cu
         return TYPE;
     }
 }
-//#endif

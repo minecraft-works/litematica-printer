@@ -7,7 +7,6 @@ import me.aleksilassila.litematica.printer.mixin_extension.MultiPlayerGameModeEx
 import me.aleksilassila.litematica.printer.utils.minecraft.NetworkUtils;
 import me.aleksilassila.litematica.printer.runtime.RuntimeAccess;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.multiplayer.MultiPlayerGameMode;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
@@ -41,11 +40,8 @@ public abstract class MixinMultiPlayerGameMode implements MultiPlayerGameModeExt
     @Shadow public abstract boolean destroyBlock(BlockPos pos);
     @Shadow protected abstract boolean sameDestroyTarget(BlockPos pos);
     @Shadow protected abstract void ensureHasSentCarriedItem();
-    //#if MC > 11802
     @Shadow public abstract InteractionResult useItemOn(LocalPlayer player, InteractionHand hand, BlockHitResult hit);
-    //#else
-    //$$ @Shadow public abstract InteractionResult useItemOn(LocalPlayer player, ClientLevel level, InteractionHand hand, BlockHitResult hit);
-    //#endif
+    @Shadow public abstract InteractionResult useItem(net.minecraft.world.entity.player.Player player, InteractionHand hand);
 
     @Unique
     private MiningInteractionController litematica_printer$controller() {
@@ -58,11 +54,7 @@ public abstract class MixinMultiPlayerGameMode implements MultiPlayerGameModeExt
         return this.litematica_printer$mining;
     }
 
-    //#if MC >= 260100
     @Inject(method = "handleContainerInput", at = @At("HEAD"), cancellable = true)
-    //#else
-    //$$ @Inject(method = "handleInventoryMouseClick", at = @At("HEAD"), cancellable = true)
-    //#endif
     private void printer$guardContainerSyncInput(CallbackInfo ci) {
         if (RuntimeAccess.get().containerSync().guardManualInput()
                 || RuntimeAccess.get().chestTrackerAdapter().guardManualInput()) ci.cancel();
@@ -95,20 +87,28 @@ public abstract class MixinMultiPlayerGameMode implements MultiPlayerGameModeExt
     public InteractionResult litematica_printer$useItemOn(
             boolean localPrediction, InteractionHand hand, BlockHitResult hit) {
         if (localPrediction) {
-            //#if MC > 11802
             return this.useItemOn(this.minecraft.player, hand, hit);
-            //#else
-            //$$ return this.useItemOn(this.minecraft.player, this.minecraft.level, hand, hit);
-            //#endif
         }
         this.ensureHasSentCarriedItem();
         if (!this.minecraft.level.getWorldBorder().isWithinBounds(hit.getBlockPos())) return InteractionResult.FAIL;
-        //#if MC > 11802
         NetworkUtils.sendPacket(sequence -> new ServerboundUseItemOnPacket(hand, hit, sequence));
-        //#else
-        //$$ NetworkUtils.sendPacket(sequence -> new ServerboundUseItemOnPacket(hand, hit));
-        //#endif
         return InteractionResult.PASS;
+    }
+
+    @Override public InteractionResult litematica_printer$useItem(InteractionHand hand,
+            me.aleksilassila.litematica.printer.printer.PlayerLook look) {
+        LocalPlayer player = this.minecraft.player;
+        if (player == null || look == null) return InteractionResult.FAIL;
+        float yaw = player.getYRot();
+        float pitch = player.getXRot();
+        try {
+            player.setYRot(look.yaw);
+            player.setXRot(look.pitch);
+            return this.useItem(player, hand);
+        } finally {
+            player.setYRot(yaw);
+            player.setXRot(pitch);
+        }
     }
 
     @Override public Minecraft client() { return this.minecraft; }
@@ -125,14 +125,13 @@ public abstract class MixinMultiPlayerGameMode implements MultiPlayerGameModeExt
         return RuntimeAccess.get().inventorySwitchGuard().isWaiting();
     }
     @Override public void ensureCarriedItemSent() { this.ensureHasSentCarriedItem(); }
+    @Override public void onPendingDestroyExpired(BlockPos pos) {
+        RuntimeAccess.get().scanEngine().reoffer("mine", pos);
+    }
 
     @Override
     public ServerboundPlayerActionPacket actionPacket(
             ServerboundPlayerActionPacket.Action action, BlockPos pos, Direction direction, int sequence) {
-        //#if MC > 11802
         return new ServerboundPlayerActionPacket(action, pos, direction, sequence);
-        //#else
-        //$$ return new ServerboundPlayerActionPacket(action, pos, direction);
-        //#endif
     }
 }

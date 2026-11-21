@@ -1,4 +1,4 @@
-//#if MC == 11802 || MC == 12001 || MC == 12104 || MC == 260100 || MC == 260300
+//#if MC == 260100 || MC == 260300
 package me.aleksilassila.litematica.printer.integration.quickshulker;
 
 import me.aleksilassila.litematica.printer.config.Configs;
@@ -12,13 +12,12 @@ import me.aleksilassila.litematica.printer.utils.minecraft.NetworkUtils;
 import me.aleksilassila.litematica.printer.utils.minecraft.PredictiveAction;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.*;
-//#if MC > 11802
 import net.minecraft.client.multiplayer.prediction.BlockStatePredictionHandler;
-//#endif
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.resources.sounds.SoundInstance;
 import net.minecraft.client.sounds.*;
 import net.minecraft.core.*;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.*;
 import net.minecraft.world.entity.player.*;
@@ -32,6 +31,7 @@ import java.util.*;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import static org.junit.jupiter.api.Assertions.*;
 import me.aleksilassila.litematica.printer.mixin_extension.*;
 import me.aleksilassila.litematica.printer.runtime.*;
@@ -65,46 +65,31 @@ class MiningInteractionRegressionTest {
     static class Player extends LocalPlayer {
         //#if MC >= 260300
         //$$ Player() { super(null, null, null, null, null, null, false, null, null); }
-        //#elseif MC >= 260100
-        Player() { super(null, null, null, null, null, null, false, null); }
         //#else
-        //$$ Player() { super(null, null, null, null, null, false, false); }
+        Player() { super(null, null, null, null, null, null, false, null); }
         //#endif
         float speed;
         Abilities abilities;
         Inventory inventory;
         ItemStack held;
+        boolean restricted;
         @Override public Abilities getAbilities() { return abilities; }
         @Override public Inventory getInventory() { return inventory; }
         @Override public ItemStack getMainHandItem() { return held; }
         @Override public boolean blockActionRestricted(net.minecraft.world.level.Level level, BlockPos pos,
-                net.minecraft.world.level.GameType mode) { return false; }
+                net.minecraft.world.level.GameType mode) { return restricted; }
         @Override public float getDestroySpeed(BlockState state) { return speed; }
         @Override public boolean hasCorrectToolForDrops(BlockState state) { return true; }
         @Override public void resetAttackStrengthTicker() { }
     }
     static class Connection extends ClientPacketListener {
-        //#if MC >= 12006
         Connection() { super(null, null, null); }
-        //#elseif MC >= 12001
-        //$$ Connection() { super(null, null, null, null, null, null); }
-        //#else
-        //$$ Connection() { super(null, null, null, null, null); }
-        //#endif
         List<ServerboundPlayerActionPacket> packets;
         @Override public void send(Packet<?> p) { if (p instanceof ServerboundPlayerActionPacket a) packets.add(a); }
     }
     static class Sounds extends SoundManager {
-        //#if MC >= 12001
         Sounds() { super(null); }
-        //#else
-        //$$ Sounds() { super(null, null); }
-        //#endif
-        //#if MC >= 260100
         @Override public SoundEngine.PlayResult play(SoundInstance sound) { return null; }
-        //#else
-        //$$ @Override public void play(SoundInstance sound) { }
-        //#endif
     }
     static class Tutorial extends net.minecraft.client.tutorial.Tutorial {
         Tutorial() { super(null, null); }
@@ -112,37 +97,32 @@ class MiningInteractionRegressionTest {
     }
     static class PredictionBridge extends MixinClientLevel { }
     static class Level extends ClientLevel implements NetworkUtils.SequenceExtension {
-        //#if MC >= 12104
         Level() { super(null, null, null, null, 0, 0, null, false, 0, 0); }
-        //#else
-        //$$ Level() { super(null, null, null, null, 0, 0, null, null, false, 0L); }
-        //#endif
         BlockState state;
+        Map<BlockPos, BlockState> states;
         long tick;
         WorldBorder border;
-        //#if MC > 11802
         BlockStatePredictionHandler predictions;
-        //#endif
         PredictionBridge bridge;
         Player player;
-        @Override public BlockState getBlockState(BlockPos pos) { return state; }
+        @Override public BlockState getBlockState(BlockPos pos) {
+            return states == null ? state : states.getOrDefault(pos, Blocks.STONE.defaultBlockState());
+        }
         @Override public WorldBorder getWorldBorder() { return border; }
+        @Override public int getMinY() { return -64; }
+        @Override public int getHeight() { return 384; }
         @Override public long getGameTime() { return tick; }
         @Override public void destroyBlockProgress(int id, BlockPos pos, int stage) { }
         //#if MC >= 260300
         //$$ @Override public void addBreakingBlockEffects(BlockPos pos, Direction direction, boolean sound) { }
         //#endif
-        //#if MC > 11802
         @Override public void syncBlockState(BlockPos pos, BlockState authoritative, Vec3 oldPosition) { state = authoritative; }
-        //#endif
         @Override public Packet<ServerGamePacketListener> litematica_printer3$predict(PredictiveAction action) {
             return bridge.litematica_printer3$predict(action);
         }
         void predictDestroy(BlockPos pos) {
             // Same retain-before-change contract confirmed from ClientLevel.setBlock bytecode.
-            //#if MC > 11802
             if (predictions.isPredicting()) predictions.retainKnownServerState(pos, state, player);
-            //#endif
             state = Blocks.AIR.defaultBlockState();
         }
     }
@@ -175,11 +155,7 @@ class MiningInteractionRegressionTest {
         public boolean isInventorySwitchPending() { return false; }
         public void ensureCarriedItemSent() { }
         public ServerboundPlayerActionPacket actionPacket(ServerboundPlayerActionPacket.Action a, BlockPos p, Direction d, int s) {
-            //#if MC > 11802
             return new ServerboundPlayerActionPacket(a, p, d, s);
-            //#else
-            //$$ return new ServerboundPlayerActionPacket(a, p, d);
-            //#endif
         }
     }
     static class GameMode extends MultiPlayerGameMode implements MiningInteractionPort, MultiPlayerGameModeExtension {
@@ -210,7 +186,17 @@ class MiningInteractionRegressionTest {
             throw new UnsupportedOperationException();
         }
     }
+    static class ScopedPrintHandler extends PrintHandler {
+        ScopedPrintHandler() { super(null); }
+        @Override protected boolean canReachIterationPosition(BlockPos pos) { return true; }
+        @Override protected boolean isInSelectionRange(BlockPos pos) { return true; }
+        @Override protected boolean isSchematicBlock(BlockPos pos) { return true; }
+    }
     static class Fixture implements AutoCloseable {
+        //#if MC >= 260300
+        //$$ final List<?> oldStoneTags = BuiltInRegistries.BLOCK.wrapAsHolder(Blocks.STONE).tags().toList();
+        //$$ final List<?> oldIceTags = BuiltInRegistries.BLOCK.wrapAsHolder(Blocks.ICE).tags().toList();
+        //#endif
         final Object oldClient = get(null, Minecraft.class, "instance");
         final Object oldNetworkClient = get(null, NetworkUtils.class, "client");
         final Object oldInteractionClient = get(null, InteractionUtils.class, "client");
@@ -228,11 +214,15 @@ class MiningInteractionRegressionTest {
         Port port = new Port();
         MiningInteractionController controller;
         MineHandler mineHandler = alloc(MineHandler.class);
-        PrintHandler printHandler = alloc(PrintHandler.class);
+        PrintHandler printHandler = alloc(ScopedPrintHandler.class);
         InteractionUtils interactions = new InteractionUtils();
         PrintWorkflowScheduler workflows = new PrintWorkflowScheduler(() -> level.tick, null);
         RuntimeScope scope = new RuntimeScope();
         Fixture(float delta, boolean delayed) throws Exception {
+            //#if MC >= 260300
+            //$$ bindWaterSupport(Blocks.STONE, withWaterSupport(this.oldStoneTags));
+            //$$ bindWaterSupport(Blocks.ICE, withWaterSupport(this.oldIceTags));
+            //#endif
             Configs.Break.BREAK_USE_DELAYED_DESTROY.setBooleanValue(delayed);
             Configs.Break.BREAK_AUTO_TOOL.setBooleanValue(false);
             Configs.Core.WORK_SWITCH.setBooleanValue(true);
@@ -242,32 +232,22 @@ class MiningInteractionRegressionTest {
             player.held = ItemStack.EMPTY;
             player.setId(42);
             player.abilities = new Abilities();
-            //#if MC >= 260100
             player.inventory = new Inventory(player, new net.minecraft.world.entity.EntityEquipment());
-            //#else
-            //$$ player.inventory = new Inventory(player);
-            //#endif
             set(player, net.minecraft.world.entity.Entity.class, "position", Vec3.ZERO);
             connection.packets = new ArrayList<>();
             set(player, LocalPlayer.class, "connection", connection);
             level.state = Blocks.STONE.defaultBlockState();
             level.border = new WorldBorder();
             level.player = player;
-            //#if MC > 11802
             level.predictions = new BlockStatePredictionHandler();
+            set(level, ClientLevel.class, "environmentAttributes",
+                    net.minecraft.world.attribute.EnvironmentAttributeSystem.builder().build());
             set(level, ClientLevel.class, "blockStatePredictionHandler", level.predictions);
-            //#endif
             level.bridge = new PredictionBridge();
-            //#if MC > 11802
             set(level.bridge, MixinClientLevel.class, "blockStatePredictionHandler", level.predictions);
-            //#endif
             client.player = player;
             client.level = level;
             var gameMode = alloc(GameMode.class);
-            //#if MC == 11802
-            //$$ set(gameMode, MultiPlayerGameMode.class, "unAckedActions",
-            //$$         new it.unimi.dsi.fastutil.objects.Object2ObjectLinkedOpenHashMap<>());
-            //#endif
             gameMode.port = port;
             client.gameMode = gameMode;
             set(client.gameMode, MultiPlayerGameMode.class, "minecraft", client);
@@ -294,6 +274,8 @@ class MiningInteractionRegressionTest {
             set(modules, FeatureModuleSet.class, "print", printHandler);
             set(printHandler, PrintHandler.class, "printTasks", workflows);
             set(runtime, PrinterRuntime.class, "modules", modules);
+            set(runtime, PrinterRuntime.class, "toolSwitchService",
+                    get(controller, MiningInteractionController.class, "toolSwitchService"));
             set(runtime, PrinterRuntime.class, "interactionUtils", interactions);
             RuntimeAccess.install(runtime);
             for (var name : List.of("mc", "level", "player", "connection", "gameMode")) {
@@ -320,11 +302,9 @@ class MiningInteractionRegressionTest {
                 next.border = new WorldBorder();
                 next.player = player;
                 next.bridge = new PredictionBridge();
-                //#if MC > 11802
                 next.predictions = new BlockStatePredictionHandler();
                 set(next, ClientLevel.class, "blockStatePredictionHandler", next.predictions);
                 set(next.bridge, MixinClientLevel.class, "blockStatePredictionHandler", next.predictions);
-                //#endif
                 client.level = next;
                 level = next;
             }
@@ -397,6 +377,10 @@ class MiningInteractionRegressionTest {
             task.buildAction(context);
         }
         @Override public void close() throws Exception {
+            //#if MC >= 260300
+            //$$ bindWaterSupport(Blocks.STONE, this.oldStoneTags);
+            //$$ bindWaterSupport(Blocks.ICE, this.oldIceTags);
+            //#endif
             set(null, Minecraft.class, "instance", oldClient);
             set(null, NetworkUtils.class, "client", oldNetworkClient);
             set(null, InteractionUtils.class, "client", oldInteractionClient);
@@ -409,6 +393,90 @@ class MiningInteractionRegressionTest {
             Configs.Core.WORK_MODE_TYPE.setOptionListValue((fi.dy.masa.malilib.config.IConfigOptionListEntry) oldType);
         }
 
+        //#if MC >= 260300
+        //$$ private static Collection<?> withWaterSupport(List<?> previous) {
+        //$$     var tags = new ArrayList<Object>(previous);
+        //$$     tags.add(net.minecraft.tags.BlockTags.ICE_MELTS_WHEN_DESTROYED_ABOVE);
+        //$$     return tags;
+        //$$ }
+        //$$ private static void bindWaterSupport(net.minecraft.world.level.block.Block block, Collection<?> tags) throws Exception {
+        //$$     var method = Holder.Reference.class.getDeclaredMethod("bindTags", Collection.class);
+        //$$     method.setAccessible(true);
+        //$$     method.invoke(BuiltInRegistries.BLOCK.wrapAsHolder(block), tags);
+        //$$ }
+        //#endif
+
+    }
+
+    @Test void aJumpingSpeedPenaltyCannotUseEarlierGroundProgressToSendStop() throws Exception {
+        try (var f = new Fixture(0.6f, false)) {
+            assertEquals(BlockBreakResult.IN_PROGRESS, f.mine());
+            f.player.speed = 0.12f * 45;
+            f.level.tick = 1;
+
+            assertEquals(BlockBreakResult.IN_PROGRESS, f.mine(),
+                    "The server sees current delta 0.12 * two elapsed mining ticks, not historical 0.6 + 0.12");
+            assertFalse(f.level.state.isAir(), "A jump cannot authorize an early local block removal");
+            assertEquals(0, f.port.localDestroys);
+            assertEquals(List.of(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK), actions(f));
+
+            for (int tick = 2; tick < 5; tick++) {
+                f.level.tick = tick;
+                assertEquals(BlockBreakResult.IN_PROGRESS, f.mine());
+            }
+            f.level.tick = 5;
+
+            assertEquals(BlockBreakResult.COMPLETED, f.mine());
+            assertEquals(List.of(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK,
+                    ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK), actions(f));
+            assertEquals(1, f.port.localDestroys);
+        }
+    }
+
+    @Test void repeatedCallbacksInOneGameTickCannotAdvanceAnOpenMiningSession() throws Exception {
+        try (var f = new Fixture(0.2f, false)) {
+            assertEquals(BlockBreakResult.IN_PROGRESS, f.mine());
+
+            for (int call = 0; call < 10; call++) {
+                assertEquals(BlockBreakResult.IN_PROGRESS, f.mine(),
+                        "Repeated callbacks do not add server mining ticks");
+            }
+
+            assertEquals(List.of(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK), actions(f));
+            assertEquals(0.2f, f.port.progress, 0.0001f);
+            assertEquals(0, f.port.localDestroys);
+            f.level.tick = 3;
+
+            assertEquals(BlockBreakResult.COMPLETED, f.mine(),
+                    "Elapsed game ticks count even when the controller was not called on every intervening tick");
+            assertEquals(List.of(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK,
+                    ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK), actions(f));
+        }
+    }
+
+    @Test void aSubInstantFastBreakCannotResendBeforeItsAuthoritativeReplyWhenDelayIsDisabled() throws Exception {
+        try (var f = new Fixture(0.8f, false)) {
+            assertEquals(BlockBreakResult.COMPLETED_WAIT, f.mine());
+            assertFalse(f.level.state.isAir());
+            assertEquals(0, f.port.localDestroys);
+            assertTrue(f.controller.isPendingDelayedDestroy(TARGET),
+                    "START and STOP submitted a real break even when optional delayed prediction is disabled");
+
+            for (int tick = 0; tick < 3; tick++) {
+                f.level.tick = tick;
+                f.controller.tick();
+                f.mine();
+                f.mine();
+            }
+
+            assertEquals(List.of(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK,
+                    ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK), actions(f));
+            f.level.state = Blocks.AIR.defaultBlockState();
+            f.controller.confirmServerBlockUpdate(TARGET);
+            assertFalse(f.controller.isPendingDelayedDestroy(TARGET));
+            assertEquals(BlockBreakResult.COMPLETED, f.mine());
+            assertEquals(2, f.connection.packets.size());
+        }
     }
 
     @ParameterizedTest @ValueSource(floats = {0.8f, 1.2f})
@@ -519,6 +587,125 @@ class MiningInteractionRegressionTest {
         }
     }
 
+    @ParameterizedTest @ValueSource(floats = {0.02f, 0.2f, 0.69f, 0.8f, 1.2f})
+    void openingAScreenDoesNotChangeAutomaticMiningTicksOrPackets(float delta) throws Exception {
+        for (boolean delayed : List.of(false, true)) {
+            var closed = runMiningWithScreen(delta, delayed, false);
+            var open = runMiningWithScreen(delta, delayed, true);
+            assertEquals(closed, open, "Skipping vanilla key handling for an open screen must not accelerate mining");
+            assertEquals(List.of(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK,
+                    ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK), closed.actions());
+        }
+    }
+
+    private static MiningRun runMiningWithScreen(float delta, boolean delayed, boolean screenOpen) throws Exception {
+        try (var f = new Fixture(delta, delayed)) {
+            List<Float> progress = new ArrayList<>();
+            for (int tick = 0; tick < 200; tick++) {
+                f.level.tick = tick;
+                f.controller.tick();
+                // Minecraft.tick skips handleKeybinds while a screen is open. With the
+                // screen closed and attack released, continueAttack calls the idle hook.
+                if (!screenOpen) f.idleInput(false);
+                f.mine();
+                f.activeTarget(f.port.destroying ? TARGET : null);
+                progress.add(f.port.progress);
+                var packets = actions(f);
+                if (packets.contains(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK)) {
+                    return new MiningRun(tick, packets, List.copyOf(progress));
+                }
+            }
+            throw new AssertionError("Automatic mining did not finish: delta=" + delta + ", screen=" + screenOpen);
+        }
+    }
+
+    private record MiningRun(int finishTick, List<ServerboundPlayerActionPacket.Action> actions,
+                             List<Float> progress) { }
+
+    @ParameterizedTest @CsvSource({"false, false, 0", "true, false, 0", "false, true, 0", "true, true, 0",
+            "false, false, 20", "true, false, 20", "false, true, 20", "true, true, 20"})
+    void authoritativeToolWearDoesNotLetIdleInputRestartAutomaticMining(boolean delayed, boolean printing, int reserve) throws Exception {
+        MiningRun closed = runMiningWithWearReceipt(delayed, false, printing, reserve);
+        MiningRun open = runMiningWithWearReceipt(delayed, true, printing, reserve);
+        assertEquals(open, closed, "A wear-only inventory receipt must not make a closed screen restart mining");
+        assertEquals(List.of(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK,
+                ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK), closed.actions());
+    }
+
+    private static MiningRun runMiningWithWearReceipt(boolean delayed, boolean screenOpen, boolean printing, int reserve) throws Exception {
+        int previousReserve = Configs.Break.BREAK_TOOL_RESERVE.getIntegerValue();
+        try (var f = new Fixture(0.2f, delayed)) {
+            Configs.Break.BREAK_TOOL_RESERVE.setIntegerValue(reserve);
+            if (printing) Configs.Core.WORK_MODE_TYPE.setOptionListValue(PrintModeType.PRINTER);
+            f.player.held = new ItemStack(net.minecraft.world.item.Items.DIAMOND_PICKAXE);
+            f.player.inventory.setItem(0, f.player.held);
+            List<Float> progress = new ArrayList<>();
+            for (int tick = 0; tick < 20; tick++) {
+                f.level.tick = tick;
+                if (tick == 1) {
+                    // A server slot update replaces the stack after an earlier break's wear.
+                    ItemStack receipt = f.player.held.copy();
+                    receipt.setDamageValue(receipt.getDamageValue() + 1);
+                    f.player.inventory.setItem(0, receipt);
+                    f.player.held = receipt;
+                    assertFalse(f.port.matchesDestroyTarget(TARGET),
+                            "Vanilla's exact component comparison rejects a wear-only receipt");
+                }
+                f.controller.tick();
+                if (!screenOpen) f.idleInput(false);
+                if (printing) f.interactions.continueDestroyBlock(TARGET);
+                else {
+                    f.mine();
+                    f.activeTarget(f.port.destroying ? TARGET : null);
+                }
+                progress.add(f.port.progress);
+                if (actions(f).contains(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK)) {
+                    return new MiningRun(tick, actions(f), List.copyOf(progress));
+                }
+            }
+            throw new AssertionError("Mining did not finish after a wear receipt");
+        } finally {
+            Configs.Break.BREAK_TOOL_RESERVE.setIntegerValue(previousReserve);
+        }
+    }
+
+    @ParameterizedTest @CsvSource({"item, false", "components, false", "reserve, false", "repair, false",
+            "item, true", "components, true", "reserve, true", "repair, true"})
+    void wearReceiptProtectionStillRejectsChangedOrUnsafeTools(String change, boolean printing) throws Exception {
+        int previousReserve = Configs.Break.BREAK_TOOL_RESERVE.getIntegerValue();
+        try (var f = new Fixture(0.2f, true)) {
+            Configs.Break.BREAK_TOOL_RESERVE.setIntegerValue(20);
+            if (printing) Configs.Core.WORK_MODE_TYPE.setOptionListValue(PrintModeType.PRINTER);
+            f.player.held = new ItemStack(net.minecraft.world.item.Items.DIAMOND_PICKAXE);
+            f.player.held.setDamageValue(f.player.held.getMaxDamage() - 25);
+            f.player.inventory.setItem(0, f.player.held);
+            if (printing) assertEquals(BlockBreakResult.IN_PROGRESS, f.interactions.continueDestroyBlock(TARGET));
+            else {
+                assertEquals(BlockBreakResult.IN_PROGRESS, f.mine());
+                f.activeTarget(TARGET);
+            }
+            ItemStack receipt = f.player.held.copy();
+            receipt.setDamageValue(receipt.getDamageValue() + 1);
+            switch (change) {
+                case "item" -> receipt = new ItemStack(net.minecraft.world.item.Items.IRON_PICKAXE);
+                case "components" -> receipt.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME,
+                        net.minecraft.network.chat.Component.literal("Different tool"));
+                case "reserve" -> receipt.setDamageValue(receipt.getMaxDamage() - 20);
+                case "repair" -> receipt.setDamageValue(f.player.held.getDamageValue() - 1);
+            }
+            f.player.inventory.setItem(0, receipt);
+            f.player.held = receipt;
+            assertFalse(printing ? f.printHandler.shouldKeepMiningOnIdleInput()
+                    : f.mineHandler.shouldKeepMiningOnIdleInput());
+            f.idleInput(false);
+            assertFalse(f.port.destroying);
+            assertEquals(List.of(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK,
+                    ServerboundPlayerActionPacket.Action.ABORT_DESTROY_BLOCK), actions(f));
+        } finally {
+            Configs.Break.BREAK_TOOL_RESERVE.setIntegerValue(previousReserve);
+        }
+    }
+
     @Test void printRemovalAlsoSurvivesIdleInputAndFinishesSlowMining() throws Exception {
         try (var f = new Fixture(0.2f, true)) {
             Configs.Core.WORK_MODE_TYPE.setOptionListValue(PrintModeType.PRINTER);
@@ -593,7 +780,11 @@ class MiningInteractionRegressionTest {
 
     @ParameterizedTest @ValueSource(booleans = {false, true})
     void changingTheHeldItemCancelsTheOldSessionBeforeAutomaticRestart(boolean printing) throws Exception {
+        int previousReserve = Configs.Break.BREAK_TOOL_RESERVE.getIntegerValue();
         try (var f = new Fixture(0.2f, true)) {
+            // This original protocol fixture replaces an unrelated held field without inventory
+            // movement/receipts. Native protection's real hotbar changes are covered separately.
+            Configs.Break.BREAK_TOOL_RESERVE.setIntegerValue(0);
             if (printing) {
                 Configs.Core.WORK_MODE_TYPE.setOptionListValue(PrintModeType.PRINTER);
                 f.interactions.continueDestroyBlock(TARGET);
@@ -610,6 +801,8 @@ class MiningInteractionRegressionTest {
                     ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK), actions(f));
             assertEquals(0.2f, f.port.progress, 0.0001f);
             assertFalse(f.level.state.isAir());
+        } finally {
+            Configs.Break.BREAK_TOOL_RESERVE.setIntegerValue(previousReserve);
         }
     }
 
@@ -779,7 +972,6 @@ class MiningInteractionRegressionTest {
         }
     }
 
-    //#if MC > 11802
     @Test void disablingPrinterDoesNotDiscardVanillasOutstandingPredictionRollback() throws Exception {
         try (var f = new Fixture(1.2f, false)) {
             f.mine();
@@ -791,7 +983,6 @@ class MiningInteractionRegressionTest {
             assertEquals(2, f.connection.packets.size());
         }
     }
-    //#endif
 
     static List<ServerboundPlayerActionPacket.Action> actions(Fixture f) {
         return f.connection.packets.stream().map(ServerboundPlayerActionPacket::getAction).toList();

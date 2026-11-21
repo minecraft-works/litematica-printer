@@ -1,7 +1,10 @@
 package me.aleksilassila.litematica.printer.handler.handlers.bedrock;
 
+import me.aleksilassila.litematica.printer.config.Configs;
 import me.aleksilassila.litematica.printer.integration.inventory.MaterialRequest;
+import me.aleksilassila.litematica.printer.runtime.RuntimeAccess;
 import me.aleksilassila.litematica.printer.utils.InventoryUtils;
+import me.aleksilassila.litematica.printer.utils.VoidWarehouseTriggerItem;
 import me.aleksilassila.litematica.printer.utils.minecraft.PlayerUtils;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
@@ -60,6 +63,29 @@ public final class BedrockInventory {
         return InventoryUtils.setItemToOffhand(new ItemStack(item), CLIENT);
     }
 
+    static boolean materialRequiresInventorySwap(Item item) {
+        LocalPlayer player = CLIENT.player;
+        if (player == null || item == null) return false;
+        if (player.getMainHandItem().is(item)
+                && VoidWarehouseTriggerItem.isUsableAsMaterial(player.getMainHandItem())) return false;
+        Inventory inventory = player.getInventory();
+        for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
+            ItemStack stack = inventory.getItem(slot);
+            if (stack.is(item) && VoidWarehouseTriggerItem.isUsableAsMaterial(stack)) {
+                return !Inventory.isHotbarSlot(slot);
+            }
+        }
+        return false;
+    }
+
+    static boolean toolRequiresInventorySwap(BlockState state, boolean cleanup) {
+        LocalPlayer player = CLIENT.player;
+        if (player == null || state == null || state.isAir()) return false;
+        ItemStack best = cleanup ? findBestCleanupBreakingStack(player, state) : findBestBreakingStack(player, state);
+        return !best.isEmpty() && !ItemStack.isSameItemSameComponents(best, player.getMainHandItem())
+                && !Inventory.isHotbarSlot(player.getInventory().findSlotMatchingItem(best));
+    }
+
     public static boolean switchToBestTool(BlockState blockState) {
         LocalPlayer player = CLIENT.player;
         if (player == null || blockState == null || blockState.isAir()) {
@@ -90,60 +116,47 @@ public final class BedrockInventory {
     }
 
     private static ItemStack findBestBreakingStack(LocalPlayer player, BlockState blockState) {
-        Inventory inventory = player.getInventory();
-        ItemStack bestStack = ItemStack.EMPTY;
-        float bestProgress = 0.0F;
-        for (ItemStack stack : InventoryUtils.getMainStacks(inventory)) {
-            if (!isAllowedBedrockTool(stack, blockState)) {
-                continue;
-            }
-            float progress = PlayerUtils.getDestroyProgress(player, blockState, stack);
-            if (progress > bestProgress) {
-                bestProgress = progress;
-                bestStack = stack;
-            }
-        }
-        if (!bestStack.isEmpty()) {
-            return bestStack;
-        }
-
-        ItemStack current = player.getMainHandItem();
-        return isAllowedBedrockTool(current, blockState) ? current : ItemStack.EMPTY;
+        return findBestTool(player, blockState, false);
     }
 
     private static ItemStack findBestCleanupBreakingStack(LocalPlayer player, BlockState blockState) {
-        Inventory inventory = player.getInventory();
-        BlockState probeState = getCleanupProbeState(blockState);
-        ItemStack bestPreferredStack = ItemStack.EMPTY;
-        float bestPreferredScore = 0.0F;
-        ItemStack bestFallbackStack = ItemStack.EMPTY;
-        float bestFallbackScore = 0.0F;
+        return findBestTool(player, getCleanupProbeState(blockState), true);
+    }
 
-        for (ItemStack stack : InventoryUtils.getMainStacks(inventory)) {
-            if (!isAllowedBedrockTool(stack, probeState)) {
-                continue;
-            }
-
-            float score = getCleanupToolScore(player, probeState, stack);
-            if (score > bestFallbackScore) {
-                bestFallbackScore = score;
-                bestFallbackStack = stack;
-            }
-            if (isPreferredCleanupTool(stack, probeState) && score > bestPreferredScore) {
-                bestPreferredScore = score;
-                bestPreferredStack = stack;
-            }
-        }
-
-        if (!bestPreferredStack.isEmpty()) {
-            return bestPreferredStack;
-        }
-        if (!bestFallbackStack.isEmpty()) {
-            return bestFallbackStack;
-        }
-
+    private static ItemStack findBestTool(LocalPlayer player, BlockState state, boolean cleanup) {
+        var runtime = RuntimeAccess.currentOrNull();
+        var service = runtime == null ? null : runtime.toolSwitchService();
+        boolean guarded = service != null && service.isDurabilityGuardActive();
+        boolean preferCurrent = Configs.Break.BREAK_TOOL_RESERVE.getIntegerValue() > 0;
         ItemStack current = player.getMainHandItem();
-        return isAllowedBedrockTool(current, probeState) ? current : ItemStack.EMPTY;
+        ItemStack best = ItemStack.EMPTY;
+        ItemStack unsafe = ItemStack.EMPTY;
+        float bestScore = 0F, unsafeScore = 0F;
+        boolean bestPreferred = false, unsafePreferred = false;
+        for (ItemStack stack : InventoryUtils.getMainStacks(player.getInventory())) {
+            if (!isAllowedBedrockTool(stack, state)) continue;
+            float score = cleanup ? getCleanupToolScore(player, state, stack)
+                    : PlayerUtils.getDestroyProgress(player, state, stack);
+            if (!(score > 0F)) continue;
+            boolean preferred = cleanup && isPreferredCleanupTool(stack, state);
+            if (guarded && !service.isToolUsable(stack)) {
+                if (unsafe.isEmpty() || preferred && !unsafePreferred || preferred == unsafePreferred && score > unsafeScore
+                        || preferCurrent && preferred == unsafePreferred && score == unsafeScore && stack == current) {
+                    unsafe = stack;
+                    unsafeScore = score;
+                    unsafePreferred = preferred;
+                }
+            } else if (best.isEmpty() || preferred && !bestPreferred || preferred == bestPreferred && score > bestScore
+                    || preferCurrent && preferred == bestPreferred && score == bestScore && stack == current) {
+                best = stack;
+                bestScore = score;
+                bestPreferred = preferred;
+            }
+        }
+        if (!best.isEmpty()) return best;
+        // With no usable candidate, let the existing guard attempt its own replacement.
+        if (!unsafe.isEmpty()) return unsafe;
+        return isAllowedBedrockTool(current, state) ? current : ItemStack.EMPTY;
     }
 
     private static boolean switchToResolvedTool(LocalPlayer player, ItemStack bestStack) {
@@ -153,7 +166,15 @@ public final class BedrockInventory {
         if (ItemStack.isSameItemSameComponents(bestStack, player.getMainHandItem())) {
             return true;
         }
-        return InventoryUtils.setPickedItemToHand(bestStack, CLIENT);
+        boolean inventorySwap = !Inventory.isHotbarSlot(player.getInventory().findSlotMatchingItem(bestStack));
+        boolean selected = InventoryUtils.setPickedItemToHand(bestStack, CLIENT);
+        if (selected && inventorySwap) {
+            // ToolSwitchService is entered after this selection. Register a real
+            // inventory SWAP here so it cannot mistake the predicted hand for a
+            // previously settled tool. A hotbar selection needs only packet order.
+            RuntimeAccess.get().inventorySwitchGuard().markSwitchIfNeeded(player.getMainHandItem());
+        }
+        return selected;
     }
 
     private static boolean isPreferredCleanupTool(ItemStack stack, BlockState blockState) {
@@ -220,7 +241,6 @@ public final class BedrockInventory {
 
     private static float getBlockBreakingSpeed(LocalPlayer player, BlockState blockState, ItemStack itemStack) {
         float speed = itemStack.getDestroySpeed(blockState);
-        //#if MC > 12006
         if (speed > 1.0F) {
             for (var entry : itemStack.getEnchantments().entrySet()) {
                 Optional<net.minecraft.resources.ResourceKey<Enchantment>> key = entry.getKey().unwrapKey();
@@ -232,14 +252,6 @@ public final class BedrockInventory {
                 }
             }
         }
-        //#else
-        //$$ if (speed > 1.0F) {
-        //$$     int level = EnchantmentHelper.getItemEnchantmentLevel(Enchantments.EFFICIENCY, itemStack);
-        //$$     if (level > 0 && !itemStack.isEmpty()) {
-        //$$         speed += (float) (level * level + 1);
-        //$$     }
-        //$$ }
-        //#endif
         if (MobEffectUtil.hasDigSpeed(player)) {
             speed *= 1.0F + (float) (MobEffectUtil.getDigSpeedAmplification(player) + 1) * 0.2F;
         }
@@ -252,12 +264,10 @@ public final class BedrockInventory {
                 default -> 8.1E-4F;
             };
         }
-        //#if MC > 12006
         AttributeInstance breakSpeed = player.getAttribute(Attributes.BLOCK_BREAK_SPEED);
         if (breakSpeed != null) {
             speed *= (float) breakSpeed.getValue();
         }
-        //#endif
         if (!player.onGround()) {
             speed /= 5.0F;
         }

@@ -48,14 +48,7 @@ private val Project.ciBuildVersion: String?
         if (isReleaseWorkflow) "beta$buildNumber" else "dev$buildNumber"
     }
 
-val Project.javaVersion
-    get() = when {
-        mcVersionInt >= 260000 -> JavaVersion.VERSION_25
-        mcVersionInt >= 12005 -> JavaVersion.VERSION_21
-        mcVersionInt >= 11800 -> JavaVersion.VERSION_17
-        mcVersionInt >= 11700 -> JavaVersion.VERSION_16
-        else -> JavaVersion.VERSION_1_8
-    }
+val Project.javaVersion get() = JavaVersion.VERSION_25
 val Project.mixinJavaVersion get() = "JAVA_${javaVersion}"
 
 val Project.fullProjectVersion: String get() {
@@ -86,44 +79,12 @@ val Project.placeholderProps: Map<String, Any?>
         "mod_homepage" to modHomepage,
         "mod_license" to modLicense,
         "mod_sources" to modSources,
-        "loader_version" to fabricLoaderVersion,
-        "fabric_api_version" to fabricApiVersion,
         "minecraft_dependency" to mcDependency,
         "compatibility_level" to mixinJavaVersion,
-        "crafter_client_mixins" to if (mcVersionInt >= 12004) {
-            "\"MixinCrafterScreen\","
-        } else {
-            ""
-        },
         "beacon_client_mixins" to if (mcVersionInt < 260200) {
             "\"printer.mc.BeaconBlockEntityAccessor\",\n" +
                     "    \"printer.mc.BeaconButtonAccessor\",\n" +
                     "    \"printer.mc.BeaconScreenMixin\","
-        } else {
-            ""
-        },
-        "chesttracker_client_mixins" to if (mcVersionInt >= 12104) {
-            "\"printer.chesttracker.ItemListWidgetAccessor\",\n" +
-                    "    \"printer.chesttracker.ItemListWidgetMixin\","
-        } else {
-            ""
-        },
-        "rewritten_easy_place_mixins" to if (mcVersionInt > 12100) {
-            "\"printer.litematica.MixinEasyPlaceUtils\","
-        } else {
-            ""
-        },
-        // 虚空仓库的库存查询只在 1.21.11+ 存在（服务端 carpet-Neko-Addition 也只支持这几个版本）。
-        // 老版本上这些混入类整个被 //#if 剔掉，这里必须同步留空 ——
-        // mixins.json 不做预处理，写死一个不存在的类名会让 Mixin 在启动阶段直接报错。
-        //
-        // 保留 missing 的施工需求语义，只在 GUI/HUD 显示收集缺口。
-        "void_warehouse_litematica_mixins" to if (mcVersionInt >= 12111) {
-            "\"printer.litematica.MixinMaterialListEntry\",\n" +
-                    "    \"printer.malilib.GuiListBaseAccessor\",\n" +
-                    "    \"printer.litematica.MixinMaterialListSorter\",\n" +
-                    "    \"printer.litematica.MixinMaterialListHudRenderer\",\n" +
-                    "    \"printer.litematica.MixinWidgetMaterialListEntry\","
         } else {
             ""
         },

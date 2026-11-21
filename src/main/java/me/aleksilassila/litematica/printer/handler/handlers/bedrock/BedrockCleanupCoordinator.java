@@ -1,6 +1,5 @@
 package me.aleksilassila.litematica.printer.handler.handlers.bedrock;
 
-import me.aleksilassila.litematica.printer.utils.CooldownUtils;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
@@ -8,52 +7,54 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.Predicate;
+import java.util.function.BooleanSupplier;
 
-/** Owns temporary machine residue and its retry/cooldown policy. */
+/** Owns residue positions and late-update watches; the placer owns actual mining attempts. */
 final class BedrockCleanupCoordinator {
-    private static final String RETRY_COOLDOWN_KEY = "cleanup_retry";
-    private static final int MAX_QUEUE_SIZE = 512;
-
+    private static final int CLEANUP_WATCH_TICKS = 40;
     private final Minecraft client;
-    private final CooldownUtils cooldownUtils;
-    private final BedrockNetworkSync networkSync;
-    private final Set<BlockPos> queue = new LinkedHashSet<>();
-    private final Set<BlockPos> conservative = new LinkedHashSet<>();
+    private final BooleanSupplier mutationsDeferred;
+    private final BedrockPlacer placer;
+    private final BedrockCleanupQueue queue = new BedrockCleanupQueue();
     private final Set<BlockPos> blocked = new LinkedHashSet<>();
-    private final Map<BlockPos, Long> cleanupGraceUntil = new HashMap<>();
     private final Map<BlockPos, Long> recentAuthoritativeCleanup = new HashMap<>();
-    private boolean orderDirty;
+    private final NavigableMap<Long, Set<BlockPos>> watchDeadlines = new TreeMap<>();
+    private final Map<BlockPos, CleanupCycle> cycles = new HashMap<>();
+    private final Map<BlockPos, Set<BlockPos>> positionOwners = new HashMap<>();
 
-    BedrockCleanupCoordinator(Minecraft client, CooldownUtils cooldownUtils) {
-        this(client, cooldownUtils, null);
-    }
-
-    BedrockCleanupCoordinator(Minecraft client, CooldownUtils cooldownUtils, BedrockNetworkSync networkSync) {
+    BedrockCleanupCoordinator(Minecraft client, BooleanSupplier mutationsDeferred, BedrockPlacer placer) {
         this.client = client;
-        this.cooldownUtils = cooldownUtils;
-        this.networkSync = networkSync;
+        this.mutationsDeferred = mutationsDeferred;
+        this.placer = placer;
     }
 
     void reset() {
         this.queue.clear();
-        this.conservative.clear();
         this.blocked.clear();
-        this.cleanupGraceUntil.clear();
         this.recentAuthoritativeCleanup.clear();
-        this.orderDirty = false;
+        this.watchDeadlines.clear();
+        this.cycles.clear();
+        this.positionOwners.clear();
     }
 
     void beginTick() {
         this.blocked.clear();
         long now = this.currentTick();
-        this.recentAuthoritativeCleanup.entrySet().removeIf(entry -> entry.getValue() < now);
+        while (!this.watchDeadlines.isEmpty() && this.watchDeadlines.firstKey() < now) {
+            var expired = this.watchDeadlines.pollFirstEntry();
+            for (BlockPos pos : expired.getValue()) {
+                this.recentAuthoritativeCleanup.remove(pos);
+                this.releasePositionIfUnowned(pos);
+            }
+        }
     }
 
     boolean isEmpty() {
@@ -72,202 +73,214 @@ final class BedrockCleanupCoordinator {
         if (pos == null) {
             return;
         }
-        this.queue.add(pos);
-        if (this.queue.size() > MAX_QUEUE_SIZE) {
-            BlockPos oldest = this.queue.iterator().next();
-            if (!oldest.equals(pos)) {
-                this.queue.remove(oldest);
-                this.conservative.remove(oldest);
-                this.blocked.remove(oldest);
-                this.cleanupGraceUntil.remove(oldest);
-            }
+        if (!predictRemoval) this.watch(pos);
+        ClientLevel level = this.client.level;
+        if (level == null) return;
+        // An unloaded client chunk returns AIR without acknowledging any server removal.
+        // Retain the owned footprint until it can be observed in a loaded chunk again.
+        if (BedrockEnvironment.isChunkLoaded(level, pos)
+                && !BedrockTargetBlocks.isCleanupResidue(level.getBlockState(pos))) {
+            this.remove(pos);
+            return;
         }
-        this.orderDirty = true;
-        if (!predictRemoval) {
-            this.conservative.add(pos);
+        this.queue.add(pos.immutable());
+    }
+
+    /** Retain late-update ownership without crossing an inventory or interaction boundary. */
+    void enqueueAuthoritative(BlockPos pos) {
+        if (pos == null) return;
+        this.add(pos, false);
+    }
+
+    /** Retired machines keep their slot through reachable cleanup, with shared positions queued once. */
+    void enqueueCycle(BlockPos owner, Set<BlockPos> positions, boolean horizontal) {
+        if (owner == null || positions == null || positions.isEmpty()) return;
+        BlockPos stableOwner = owner.immutable();
+        for (BlockPos pos : positions) {
+            if (pos == null) continue;
+            this.enqueueAuthoritative(pos);
+            if (!this.queue.contains(pos) && !this.recentAuthoritativeCleanup.containsKey(pos)) continue;
+            var cycle = this.cycles.computeIfAbsent(stableOwner, ignored -> new CleanupCycle());
+            cycle.horizontal |= horizontal;
+            BlockPos stablePos = pos.immutable();
+            cycle.positions.add(stablePos);
+            this.positionOwners.computeIfAbsent(stablePos, ignored -> new LinkedHashSet<>()).add(stableOwner);
         }
     }
 
+    /** A successfully admitted machine owns future updates for its reused positions. */
+    void transferOwnership(Set<BlockPos> positions) {
+        if (positions == null || positions.isEmpty()) return;
+        for (BlockPos pos : positions) {
+            if (pos == null || this.placer.isCleanupPendingAt(pos)) continue;
+            this.queue.remove(pos);
+            this.blocked.remove(pos);
+            this.unwatch(pos);
+            this.releasePositionIfUnowned(pos);
+        }
+    }
+
+    int reachableCycleCount() {
+        return this.countReachableCycles(false);
+    }
+
+    int verticalCycleCount() {
+        return this.countReachableCycles(true);
+    }
+
+    boolean hasReachableCycle(BlockPos owner) {
+        var cycle = this.cycles.get(owner);
+        return cycle != null && this.isReachableCycle(cycle);
+    }
+
+    boolean isCycleClear(BlockPos owner) {
+        var cycle = this.cycles.get(owner);
+        return cycle == null || this.client.level != null && cycle.positions.stream().allMatch(pos ->
+                BedrockEnvironment.isChunkLoaded(this.client.level, pos)
+                        && !BedrockTargetBlocks.isCleanupResidue(this.client.level.getBlockState(pos))
+                        && !this.placer.isCleanupPendingAt(pos));
+    }
+
+    private boolean isReachableCycle(CleanupCycle cycle) {
+        return this.client.level != null && this.client.player != null && cycle.positions.stream().anyMatch(pos ->
+                this.queue.contains(pos) && BedrockEnvironment.canInteract(pos) && this.isReachableResidue(pos));
+    }
+
+    private int countReachableCycles(boolean verticalOnly) {
+        ClientLevel level = this.client.level;
+        if (level == null || this.client.player == null) return 0;
+        Set<BlockPos> reachable = new LinkedHashSet<>();
+        for (BlockPos pos : this.queue.nearby(this.client)) {
+            Set<BlockPos> owners = this.positionOwners.get(pos);
+            if (owners == null || !this.isReachableResidue(pos)) continue;
+            for (BlockPos owner : owners) {
+                if (!verticalOnly || !this.cycles.get(owner).horizontal) reachable.add(owner);
+            }
+        }
+        return reachable.size();
+    }
+
+    private boolean isReachableResidue(BlockPos pos) {
+        return !this.placer.isCleanupRetryPausedAt(pos)
+                && BedrockEnvironment.isChunkLoaded(this.client.level, pos)
+                && BedrockTargetBlocks.isCleanupResidue(this.client.level.getBlockState(pos));
+    }
+
+    private static final class CleanupCycle {
+        private final Set<BlockPos> positions = new LinkedHashSet<>();
+        private boolean horizontal;
+    }
+
+    /** A position can release its old cycles only after both work and late-update ownership end. */
+    private void releasePositionIfUnowned(BlockPos pos) {
+        if (this.queue.contains(pos) || this.recentAuthoritativeCleanup.containsKey(pos)) return;
+        Set<BlockPos> owners = this.positionOwners.remove(pos);
+        if (owners == null) return;
+        for (BlockPos owner : owners) {
+            CleanupCycle cycle = this.cycles.get(owner);
+            cycle.positions.remove(pos);
+            if (cycle.positions.isEmpty()) this.cycles.remove(owner);
+        }
+    }
+
+    /** Clear current work without forgetting placements already in flight during the watch window. */
     void remove(BlockPos pos) {
         this.queue.remove(pos);
-        this.conservative.remove(pos);
         this.blocked.remove(pos);
-        this.cleanupGraceUntil.remove(pos);
-        this.recentAuthoritativeCleanup.remove(pos);
-        this.orderDirty = true;
+        this.releasePositionIfUnowned(pos);
     }
 
     void markBlocked(BlockPos pos) {
         if (pos != null) {
             this.blocked.add(pos);
-            this.orderDirty = true;
         }
     }
 
     void process(Predicate<BlockPos> reserved, int limit) {
-        if (this.queue.isEmpty()) {
+        if (this.queue.isEmpty() || limit <= 0 || this.mutationsDeferred.getAsBoolean()) {
             return;
         }
-        this.reorder();
-        int count = 0;
-        Iterator<BlockPos> iterator = this.queue.iterator();
-        while (iterator.hasNext() && count < limit) {
-            BlockPos pos = iterator.next();
-            ClientLevel level = this.client.level;
-            if (level == null) {
-                break;
-            }
+        ClientLevel level = this.client.level;
+        if (level == null) return;
+        var candidates = new ArrayList<CleanupCandidate>();
+        for (BlockPos pos : this.queue.nearby(this.client)) {
+            if (!BedrockEnvironment.isChunkLoaded(level, pos)) continue;
             BlockState state = level.getBlockState(pos);
             if (state.isAir() || !BedrockTargetBlocks.isCleanupResidue(state)) {
-                if (this.isWithinCleanupGrace(pos)) {
-                    continue;
-                }
-                iterator.remove();
-                this.conservative.remove(pos);
-                this.blocked.remove(pos);
-                this.cleanupGraceUntil.remove(pos);
+                this.remove(pos);
                 continue;
             }
             if (reserved.test(pos)) {
                 this.markBlocked(pos);
                 continue;
             }
-            if (!this.cooldownUtils.isOnCooldown(level, RETRY_COOLDOWN_KEY, pos)) {
-                boolean predictRemoval = !this.conservative.contains(pos);
-                if (BedrockBreaker.breakBlock(pos, predictRemoval)) {
-                    int retryDelay = this.adaptiveRetryDelay(state);
-                    this.cooldownUtils.setCooldown(level, RETRY_COOLDOWN_KEY, pos, retryDelay);
-                    count++;
-                }
-            }
+            candidates.add(new CleanupCandidate(pos, this.priority(pos, state), this.queue.order(pos)));
         }
+        candidates.sort(Comparator.comparingInt(CleanupCandidate::priority).thenComparingLong(CleanupCandidate::order));
+        this.placer.breakCleanupBlocks(candidates.stream().map(CleanupCandidate::pos).toList(), limit);
     }
 
-    void cleanupBlockOrQueue(BlockPos pos, boolean predictRemoval, Predicate<BlockPos> reserved) {
-        if (pos == null) {
-            return;
-        }
-        this.add(pos, predictRemoval);
-        ClientLevel level = this.client.level;
-        if (level == null || reserved.test(pos)) {
-            return;
-        }
-        BlockState state = level.getBlockState(pos);
-        if (!predictRemoval && this.shouldDeferAuthoritativeCleanup(pos, state)) {
-            return;
-        }
-        if (BedrockTargetBlocks.isCleanupResidue(state) && BedrockBreaker.breakBlock(pos, predictRemoval)) {
-            this.cooldownUtils.setCooldown(level, RETRY_COOLDOWN_KEY, pos, this.adaptiveRetryDelay(state));
-        }
-    }
-
-    void expedite(BlockPos pos, BlockState state, Predicate<BlockPos> reserved) {
-        ClientLevel level = this.client.level;
-        if (level == null || pos == null || state == null) {
-            return;
-        }
-        if (!BedrockTargetBlocks.isCleanupResidue(state) || reserved.test(pos)) {
-            return;
-        }
-        if (this.cooldownUtils.isOnCooldown(level, RETRY_COOLDOWN_KEY, pos)) {
-            return;
-        }
-        if (this.shouldDeferAuthoritativeCleanup(pos, state)) {
-            return;
-        }
-        if (BedrockBreaker.breakBlock(pos, false)) {
-            int retryDelay = this.adaptiveRetryDelay(state);
-            this.cooldownUtils.setCooldown(level, RETRY_COOLDOWN_KEY, pos, retryDelay);
-        }
-    }
+    private record CleanupCandidate(BlockPos pos, int priority, long order) { }
 
     int samplePressure(ClientLevel level, Predicate<BlockPos> reserved) {
         int pressure = 0;
-        Iterator<BlockPos> iterator = this.queue.iterator();
-        while (iterator.hasNext()) {
-            BlockPos pos = iterator.next();
-            if (pos == null || reserved.test(pos)) {
+        if (level == null) return 0;
+        for (BlockPos pos : this.queue.nearby(this.client)) {
+            if (!BedrockEnvironment.isChunkLoaded(level, pos) || reserved.test(pos)) {
                 continue;
             }
             BlockState state = level.getBlockState(pos);
             if (state.isAir() || !BedrockTargetBlocks.isCleanupResidue(state)) {
-                if (this.isWithinCleanupGrace(pos)) {
-                    continue;
-                }
-                iterator.remove();
-                this.conservative.remove(pos);
-                this.blocked.remove(pos);
-                this.cleanupGraceUntil.remove(pos);
+                this.remove(pos);
                 continue;
             }
-            if (BedrockEnvironment.canInteract(pos)
-                    && !state.isAir() && BedrockTargetBlocks.isCleanupResidue(state)) {
+            if (!this.placer.isCleanupRetryPausedAt(pos)) {
                 pressure += pressureWeight(state);
             }
         }
         return pressure;
     }
 
-    int retryDelay(BlockState state) {
-        if (state.is(Blocks.REDSTONE_TORCH) || state.is(Blocks.REDSTONE_WALL_TORCH)) {
-            return 3;
-        }
-        if (state.is(Blocks.PISTON_HEAD) || state.is(Blocks.PISTON)) {
-            return 4;
-        }
-        if (state.is(Blocks.MOVING_PISTON)) {
-            return 6;
-        }
-        if (state.is(Blocks.SLIME_BLOCK)) {
-            return 8;
-        }
-        return 6;
-    }
-
-    private int adaptiveRetryDelay(BlockState state) {
-        int delay = retryDelay(state);
-        return this.networkSync == null ? delay : this.networkSync.retryDelayTicks(delay);
-    }
-
     void onServerBlockUpdate(BlockPos pos) {
-        if (pos == null || !this.recentAuthoritativeCleanup.containsKey(pos)) {
+        Long deadline = pos == null ? null : this.recentAuthoritativeCleanup.get(pos);
+        if (deadline == null && !this.queue.contains(pos)) {
             return;
         }
         ClientLevel level = this.client.level;
         if (level == null) {
             return;
         }
+        // An update can arrive before beginTick has pruned expired watches.
+        if (deadline != null && deadline < this.currentTick()) {
+            this.unwatch(pos);
+            this.releasePositionIfUnowned(pos);
+            if (!this.queue.contains(pos)) return;
+        }
+        if (!BedrockEnvironment.isChunkLoaded(level, pos)) return;
         BlockState state = level.getBlockState(pos);
         if (state.isAir() || !BedrockTargetBlocks.isCleanupResidue(state)) {
             this.remove(pos);
             return;
         }
         this.queue.add(pos.immutable());
-        this.conservative.add(pos.immutable());
-        this.cleanupGraceUntil.remove(pos);
-        this.orderDirty = true;
     }
 
-    private boolean shouldDeferAuthoritativeCleanup(BlockPos pos, BlockState state) {
-        if (this.networkSync == null || !this.networkSync.isAdaptiveMultiplayer()) {
-            return false;
-        }
+    private void watch(BlockPos pos) {
         long now = this.currentTick();
-        this.recentAuthoritativeCleanup.put(
-                pos.immutable(), now + this.networkSync.cleanupWatchTicks());
-        int delay = this.networkSync.retryDelayTicks(
-                state != null && BedrockTargetBlocks.isCleanupResidue(state) ? retryDelay(state) : 1);
-        this.cleanupGraceUntil.put(
-                pos.immutable(), now + this.networkSync.confirmationTimeoutTicks());
-        if (this.client.level != null) {
-            this.cooldownUtils.setCooldown(this.client.level, RETRY_COOLDOWN_KEY, pos, delay);
-        }
-        return true;
+        if (now == Long.MIN_VALUE) return;
+        this.unwatch(pos);
+        BlockPos stable = pos.immutable();
+        long deadline = now + CLEANUP_WATCH_TICKS;
+        this.recentAuthoritativeCleanup.put(stable, deadline);
+        this.watchDeadlines.computeIfAbsent(deadline, ignored -> new LinkedHashSet<>()).add(stable);
     }
 
-    private boolean isWithinCleanupGrace(BlockPos pos) {
-        Long deadline = this.cleanupGraceUntil.get(pos);
-        return deadline != null && deadline >= this.currentTick();
+    private void unwatch(BlockPos pos) {
+        Long deadline = this.recentAuthoritativeCleanup.remove(pos);
+        if (deadline == null) return;
+        Set<BlockPos> bucket = this.watchDeadlines.get(deadline);
+        bucket.remove(pos);
+        if (bucket.isEmpty()) this.watchDeadlines.remove(deadline);
     }
 
     private long currentTick() {
@@ -288,21 +301,6 @@ final class BedrockCleanupCoordinator {
             return 55;
         }
         return 40;
-    }
-
-    private void reorder() {
-        ClientLevel level = this.client.level;
-        if (!this.orderDirty || this.queue.size() < 2 || level == null) {
-            return;
-        }
-        List<BlockPos> ordered = new ArrayList<>(this.queue);
-        ordered.sort((left, right) -> Integer.compare(
-                this.priority(left, level.getBlockState(left)),
-                this.priority(right, level.getBlockState(right))
-        ));
-        this.queue.clear();
-        this.queue.addAll(ordered);
-        this.orderDirty = false;
     }
 
     private int priority(BlockPos pos, BlockState state) {

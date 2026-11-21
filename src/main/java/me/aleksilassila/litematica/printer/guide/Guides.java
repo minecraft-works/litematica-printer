@@ -6,6 +6,7 @@ import me.aleksilassila.litematica.printer.printer.SchematicBlockContext;
 import me.aleksilassila.litematica.printer.printer.action.Action;
 import net.minecraft.world.level.block.*;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
+import net.minecraft.core.BlockPos;
 
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -13,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 public class Guides {
     private final List<GuideRegistration> registrations = new ArrayList<>();
@@ -29,17 +31,12 @@ public class Guides {
         // ============================================================
         register(SkipGuide::new,
                 LiquidBlock.class,
-                BubbleColumnBlock.class,
-                LilyPadBlock.class
+                BubbleColumnBlock.class
         );
 
         // 火把
         register(TorchGuide::new,
-                //#if MC > 12002
                 BaseTorchBlock.class
-                //#else
-                //$$ TorchBlock.class
-                //#endif
         );
 
         // 紫水晶芽
@@ -47,6 +44,12 @@ public class Guides {
 
         // 花
         register(FlowerGuide::new, FlowerBlock.class);
+        register(LilyPadGuide::new, LilyPadBlock.class);
+
+        register(TallGrassGuide::new, DoublePlantBlock.class);
+        register(AquaticPlantGuide::new, SeagrassBlock.class, TallSeagrassBlock.class, KelpBlock.class, KelpPlantBlock.class);
+        register(SmallDripleafGuide::new, SmallDripleafBlock.class);
+        register(LeafLitterGuide::new, LeafLitterBlock.class);
 
         // 台阶
         register(SlabGuide::new, SlabBlock.class);
@@ -82,10 +85,8 @@ public class Guides {
         register(SignGuide::new,
                 StandingSignBlock.class,
                 WallSignBlock.class
-                //#if MC >= 12002
                 , WallHangingSignBlock.class
                 , CeilingHangingSignBlock.class
-                //#endif
         );
 
         // 旗帜
@@ -124,10 +125,8 @@ public class Guides {
         // 铁轨
         register(RailGuide::new, BaseRailBlock.class);
 
-        // 合成器（MC 1.21+）
-        //#if MC >= 12003
+        // 合成器
         register(CrafterGuide::new, CrafterBlock.class);
-        //#endif
 
         // ============================================================
         // 交互指南（WRONG_STATE 处理为主）
@@ -179,16 +178,10 @@ public class Guides {
         // 阳光探测器（反转切换）
         register(DaylightDetectorGuide::new, DaylightDetectorBlock.class);
 
-        // 花簇（MC 1.19.4+）
-        //#if MC >= 11904
+        // 花簇
         register(FlowerBedGuide::new,
-                //#if MC >= 12105
                 FlowerBedBlock.class
-                //#else
-                //$$ PinkPetalsBlock.class
-                //#endif
         );
-        //#endif
 
         // 藤蔓/发光地衣
         register(VineGuide::new, VineBlock.class, GlowLichenBlock.class);
@@ -245,6 +238,12 @@ public class Guides {
     }
 
     public final Optional<Action> buildAction(SchematicBlockContext context) {
+        return this.buildAction(context, ignored -> false);
+    }
+
+    /** Cross-position repairs require the caller's live reach and selection checks. */
+    public final Optional<Action> buildAction(SchematicBlockContext context, Predicate<BlockPos> repairAllowed) {
+        DoublePlantRepair.queueLowerResetIfNeeded(context, repairAllowed);
         BlockMatchResult blockMatchResult = BlockMatchResult.compare(context);
         Block requiredBlock = context.requiredState.getBlock();
         List<GuideRegistration> matching = this.registrationsByBlockClass.computeIfAbsent(

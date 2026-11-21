@@ -280,7 +280,7 @@ class FillMaterialRegressionTest {
         final FillHandler fill = alloc(FillHandler.class);
         final InventoryPlayer player = alloc(InventoryPlayer.class);
         final FillLevel world = alloc(FillLevel.class);
-        final HudStatsManager hud = new HudStatsManager(base.client, () -> world.tick, null);
+        final HudStatsManager hud = new HudStatsManager(base.client, () -> world.tick);
         final InventorySwitchGuard switchGuard = new InventorySwitchGuard(base.client, () -> world.tick);
         final Provider provider = new Provider();
         final Set<BlockPos> retries = new LinkedHashSet<>();
@@ -347,7 +347,7 @@ class FillMaterialRegressionTest {
             var coordinator = Class.forName("me.aleksilassila.litematica.printer.handler.ModuleScanCoordinator")
                     .getDeclaredConstructors()[0];
             coordinator.setAccessible(true);
-            set(fill, FeatureModuleBase.class, "scanCoordinator", coordinator.newInstance(null, null, scan));
+            set(fill, FeatureModuleBase.class, "scanCoordinator", coordinator.newInstance(null, null));
         }
 
         void blocklist(String... entries) throws Exception {

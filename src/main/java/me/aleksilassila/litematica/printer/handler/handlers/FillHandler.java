@@ -1,6 +1,7 @@
 package me.aleksilassila.litematica.printer.handler.handlers;
 
 import me.aleksilassila.litematica.printer.integration.inventory.MaterialRequest;
+import me.aleksilassila.litematica.printer.interfaces.Implementation;
 import lombok.Getter;
 import me.aleksilassila.litematica.printer.config.Configs;
 import me.aleksilassila.litematica.printer.config.ConfiguredPlacementSettings;
@@ -15,6 +16,8 @@ import me.aleksilassila.litematica.printer.I18n;
 import me.aleksilassila.litematica.printer.handler.FeatureModuleBase;
 import me.aleksilassila.litematica.printer.core.runtime.RuntimeEvent;
 import me.aleksilassila.litematica.printer.handler.scan.ScanIntent;
+import me.aleksilassila.litematica.printer.handler.scan.StableCandidateMerge;
+import me.aleksilassila.litematica.printer.handler.scan.BoundedTargetSet;
 import me.aleksilassila.litematica.printer.printer.PlayerLook;
 import me.aleksilassila.litematica.printer.printer.PrinterUtils;
 import me.aleksilassila.litematica.printer.printer.action.ActionPort;
@@ -58,7 +61,8 @@ public class FillHandler extends FeatureModuleBase {
     private List<PrinterBox> fillScanBoxes = List.of();
     private int fillScanConfigHash;
     private int observedFillScanConfigHash = Integer.MIN_VALUE;
-    private final Set<BlockPos> retryTargets = new LinkedHashSet<>();
+    private final Set<BlockPos> retryTargets = new BoundedTargetSet(BoundedTargetSet.DEFAULT_CAPACITY, null,
+            pos -> this.scanEngine.reoffer(this.getId(), pos));
     private final Set<BlockPos> inFlightTargets = new LinkedHashSet<>();
     private final Map<BlockPos, Long> inFlightSince = new HashMap<>();
 
@@ -117,7 +121,7 @@ public class FillHandler extends FeatureModuleBase {
                 this.blocklistMaterialsActive = false;
                 if (Configs.Fill.FILL_BLOCK_MODE.getOptionListValue() == FillBlockModeType.HANDHELD) {
                     ItemStack heldStack = player.getMainHandItem(); // 获取主手物品
-                    if (!heldStack.isEmpty() && heldStack.getCount() > 0) {
+                    if (!heldStack.isEmpty() && heldStack.getCount() > 0 && heldStack.getItem() instanceof BlockItem) {
                         fillModeItemList = new Item[]{player.getMainHandItem().getItem()};
                         this.hudStats.recordStatus(HudStatsManager.Mode.FILL, HudStatus.RUNNING);
                     } else {
@@ -142,6 +146,9 @@ public class FillHandler extends FeatureModuleBase {
 
     @Override
     protected void onRuntimeReset() {
+        this.fillCacheBlocklist = new ArrayList<>();
+        this.blocklistMaterialsActive = false;
+        this.fillModeItemList = new Item[0];
         this.clearFillTargets();
         this.retryTargets.clear();
         this.inFlightTargets.clear();
@@ -227,7 +234,7 @@ public class FillHandler extends FeatureModuleBase {
                 .toList();
         if (scanSourceBoxes.isEmpty() || fullScanSourceBoxes.isEmpty() || fullScanSourceBox == null) {
             this.clearFillTargets();
-            return retainedTargets;
+            return StableCandidateMerge.merge(retainedTargets, List.of(), this.scanEngine.targetComparator(NAME));
         }
 
         int configHash = this.getFillScanConfigHash();
@@ -239,12 +246,14 @@ public class FillHandler extends FeatureModuleBase {
             this.fillScanBoxes = List.copyOf(fullScanSourceBoxes);
         }
 
-        // ScanEngine already exposes a resumable candidate iterable and its explicit pause
-        // state. A second look-ahead iterator would hide budget pauses from the coordinator.
+        // The merge retains the source pause contract and needs only one fresh lookahead.
         Iterable<BlockPos> source = this.createSourceIterator(scanSourceBoxes, reachPredicate, selectionPredicate);
-        return retainedTargets.isEmpty()
-                ? source
-                : com.google.common.collect.Iterables.concat(retainedTargets, source);
+        return StableCandidateMerge.merge(retainedTargets, source, this.scanEngine.targetComparator(NAME),
+                pos -> this.retryTargets.add(pos.immutable()));
+    }
+
+    @Override protected BlockPos peekQueuedIterationTarget() {
+        return this.peekRetainedIterationTarget(this.retryTargets, pos -> !this.inFlightTargets.contains(pos));
     }
 
     private Iterable<BlockPos> createSourceIterator(
@@ -313,7 +322,8 @@ public class FillHandler extends FeatureModuleBase {
     public boolean canIterationBlockPos(BlockPos blockPos) {
         if (Configs.Fill.FILL_BLOCK_MODE.getOptionListValue() == FillBlockModeType.HANDHELD) {
             ItemStack heldStack = player.getMainHandItem(); // 获取主手物品
-            return !heldStack.isEmpty() && heldStack.getCount() > 0 && this.isFillTarget(blockPos);
+            return !heldStack.isEmpty() && heldStack.getCount() > 0
+                    && heldStack.getItem() instanceof BlockItem && this.isFillTarget(blockPos);
         }
         return this.isFillTarget(blockPos);
     }
@@ -325,6 +335,12 @@ public class FillHandler extends FeatureModuleBase {
             return;
         }
         boolean handheld = Configs.Fill.FILL_BLOCK_MODE.getOptionListValue() == FillBlockModeType.HANDHELD;
+        ItemStack heldStack = player.getMainHandItem();
+        if (handheld && (heldStack.isEmpty() || heldStack.getCount() <= 0 || !(heldStack.getItem() instanceof BlockItem))) {
+            this.hudStats.recordStatus(HudStatsManager.Mode.FILL, HudStatus.MAIN_HAND_NO_BLOCK);
+            setIterationConsumedEffectiveExecution(false);
+            return;
+        }
         BlockState currentState = level.getBlockState(blockPos);
         if (!this.isFillTarget(currentState)) {
             setIterationConsumedEffectiveExecution(false);
@@ -383,7 +399,7 @@ public class FillHandler extends FeatureModuleBase {
                 clickTarget,
                 clickSide,
                 Vec3.ZERO,
-                false,
+                Implementation.isInteractive(this.level.getBlockState(clickTarget).getBlock()),
                 1,
                 expectedItems,
                     ActionPort.ActionSource.FILL

@@ -4,25 +4,11 @@ import fi.dy.masa.malilib.config.options.ConfigColor;
 import me.aleksilassila.litematica.printer.I18n;
 import me.aleksilassila.litematica.printer.config.PrinterConfigOptions;
 
-public class ColorConfigBuilder extends BaseConfigBuilder<ConfigColor, ColorConfigBuilder> {
-    private String defaultValue = "";
-
-    public ColorConfigBuilder(I18n i18n) {
-        super(i18n);
-    }
-
-    public ColorConfigBuilder(String translateKey) {
-        this(I18n.of(translateKey));
-    }
-
-    public ColorConfigBuilder defaultValue(String value) {
-        this.defaultValue = value;
-        return this;
-    }
-
-    @Override
-    public ConfigColor build() {
-        ConfigColor config = new PrinterConfigOptions.ColorOption(i18n.getNameKey(), defaultValue, descKey);
-        return buildExtension(config);
+public final class ColorConfigBuilder extends BaseConfigBuilder<ConfigColor, ColorConfigBuilder> {
+    private String value = "#FFFFFFFF";
+    public ColorConfigBuilder(String key) { super(I18n.of(key)); }
+    public ColorConfigBuilder defaultValue(String value) { this.value = value; return this; }
+    @Override public ConfigColor build() {
+        return buildExtension(new PrinterConfigOptions.ColorOption(i18n.getNameKey(), this.value, descKey));
     }
 }

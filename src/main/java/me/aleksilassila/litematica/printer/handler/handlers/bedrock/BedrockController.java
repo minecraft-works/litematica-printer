@@ -27,6 +27,20 @@ public final class BedrockController {
         engine().tick();
     }
 
+    public static void beginTick(boolean allowMutations) {
+        var engine = engine();
+        engine.observeSupplies(RuntimeAccess.get().materialRequests());
+        engine.beginTick(allowMutations);
+    }
+
+    public static void finishTick(boolean allowMutations) {
+        engine().finishTick(allowMutations);
+    }
+
+    public static boolean prepareMaterials() {
+        return engine().prepareMaterials(RuntimeAccess.get().materialRequests());
+    }
+
     public static boolean hasActiveWork() {
         return engine().hasActiveWork();
     }
@@ -83,7 +97,11 @@ public final class BedrockController {
             BedrockTorchPlacement placement,
             BedrockTarget self
     ) {
-        return engine().isTorchPlacementReservedByOtherTarget(placement, self);
+        return engine() != null && engine().isTorchPlacementReservedByOtherTarget(placement, self);
+    }
+
+    static boolean hasInFlightPowerConflict(BedrockTarget self, BlockPos torchPos) {
+        return engine() != null && engine().hasInFlightPowerConflict(self, torchPos);
     }
 
     public static void clearSubmissionPlans() {

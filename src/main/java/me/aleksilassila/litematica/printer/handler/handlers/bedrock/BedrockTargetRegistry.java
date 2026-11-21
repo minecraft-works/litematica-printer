@@ -31,6 +31,10 @@ final class BedrockTargetRegistry {
         this.targets.add(target);
     }
 
+    boolean containsOwner(BlockPos owner) {
+        return this.targets.stream().anyMatch(target -> target != null && target.getBedrockPos().equals(owner));
+    }
+
     Iterator<BedrockTarget> iterator() {
         return this.targets.iterator();
     }
@@ -48,6 +52,7 @@ final class BedrockTargetRegistry {
         if (pos == null || state == null || state.isAir()) {
             return false;
         }
+        if (this.hasInFlightPowerConflict(candidate, candidate.getTorchPos())) return false;
         for (BedrockTarget target : this.targets) {
             if (target.sharesTorchPlacementWith(candidate)) {
                 return candidate.canReusePowerReservation(pos, state);
@@ -96,6 +101,7 @@ final class BedrockTargetRegistry {
         if (placement == null) {
             return false;
         }
+        if (this.hasInFlightPowerConflict(self, placement.getTorchPos())) return true;
         for (BedrockTarget target : this.targets) {
             if (target == self || target.matchesTorchPlacement(placement)) {
                 continue;
@@ -104,6 +110,14 @@ final class BedrockTargetRegistry {
                     || target.getReservedPositions().contains(placement.getTorchPos())) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    boolean hasInFlightPowerConflict(BedrockTarget self, BlockPos torchPos) {
+        if (torchPos == null) return false;
+        for (BedrockTarget target : this.targets) {
+            if (target != self && target.hasTried() && target.isTorchPoweredBy(torchPos)) return true;
         }
         return false;
     }
@@ -155,17 +169,6 @@ final class BedrockTargetRegistry {
     BedrockTarget findSideExclusive() {
         for (BedrockTarget target : this.targets) {
             if (target != null && target.isHorizontalLayout()) {
-                return target;
-            }
-        }
-        return null;
-    }
-
-    BedrockTarget findSideLookTarget() {
-        for (BedrockTarget target : this.targets) {
-            if (target != null
-                    && target.isHorizontalLayout()
-                    && target.hasPendingHorizontalLook()) {
                 return target;
             }
         }

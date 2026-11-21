@@ -12,13 +12,16 @@ import org.jetbrains.annotations.Nullable;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.state.BlockState;
 
 final class QueuedClick {
     final BlockPos target;
     final Direction side;
     Vec3 hitModifier;
+    final Vec3 physicalHitModifier;
     final boolean useShift;
     boolean useProtocol;
+    boolean waterSurfacePlacement;
     final int repeatCount;
     final PlacementPolicy policy;
     @Nullable
@@ -30,6 +33,11 @@ final class QueuedClick {
     Consumer<ActionManager.SendResult> completionListener;
     @Nullable
     Predicate<ItemStack> expectedStackPredicate;
+    @Nullable
+    BlockPos warehouseTarget;
+    int warehouseExpectedStateId;
+    @Nullable
+    BlockState warehouseDesiredState;
 
     QueuedClick(
             @NotNull BlockPos target,
@@ -42,6 +50,7 @@ final class QueuedClick {
         this.target = target;
         this.side = side;
         this.hitModifier = hitModifier;
+        this.physicalHitModifier = hitModifier;
         this.useShift = useShift;
         this.repeatCount = Math.max(1, repeatCount);
         this.policy = policy;

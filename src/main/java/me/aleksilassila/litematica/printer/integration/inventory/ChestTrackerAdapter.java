@@ -41,21 +41,17 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-//#if MC >= 12104
 import red.jackf.chesttracker.api.memory.Memory;
 import red.jackf.chesttracker.api.memory.MemoryBank;
 import red.jackf.chesttracker.api.memory.MemoryKey;
 import red.jackf.chesttracker.api.memory.MemoryBankAccess;
 import red.jackf.chesttracker.api.providers.ProviderUtils;
-//#endif
 
 /** Optional Chest Tracker world-container material provider. */
 public final class ChestTrackerAdapter implements InventoryProvider, RuntimeComponent {
     private static final String LEASE_OWNER = "chest_tracker";
     private static final int MAX_SCAN_CANDIDATES = 64;
-    private static final int OPEN_TIMEOUT_BASE_TICKS = 8;
-    private static final int OPEN_TIMEOUT_SAFETY_TICKS = 2;
-    private static final int OPEN_TIMEOUT_MAX_TICKS = 60;
+    private static final int OPEN_TIMEOUT_TICKS = 10;
     private static final long REQUEST_TIMEOUT_TICKS = 200L;
     private static final long NOT_FOUND_COOLDOWN_TICKS = 400L;
 
@@ -114,7 +110,7 @@ public final class ChestTrackerAdapter implements InventoryProvider, RuntimeComp
         LocalPlayer player = this.client.player;
         if (player == null || this.client.level == null) return unavailable(request);
         for (Item item : request.acceptedItems()) {
-            if (InventoryUtils.playerHasItemInInventory(player, item, request::acceptsStack)) {
+            if (InventoryUtils.playerHasItemInInventory(player, item, request::acceptsStack, request.minimumCount())) {
                 return MaterialReservation.available(request, item);
             }
         }
@@ -153,7 +149,8 @@ public final class ChestTrackerAdapter implements InventoryProvider, RuntimeComp
         if (this.transfer != null || this.openingMenu != null || this.phase == Phase.WAITING_CONTENT
                 || waitForRestoreContent(this.phase) || this.cancelling) return pending(request);
         for (Item item : request.acceptedItems()) {
-            if (InventoryUtils.playerHasItemInInventory(this.client.player, item, request::acceptsStack)) {
+            if (InventoryUtils.playerHasItemInInventory(this.client.player, item,
+                    request::acceptsStack, request.minimumCount())) {
                 if (this.nestedReturn.hasSource() && !this.nestedReturn.isRestoring()) {
                     beginNestedRestore();
                     if (this.activeRequest != null) return pending(request);
@@ -375,14 +372,6 @@ public final class ChestTrackerAdapter implements InventoryProvider, RuntimeComp
         return REQUEST_TIMEOUT_TICKS;
     }
 
-    private long openTimeoutTicks() {
-        return RuntimeAccess.get().rttReplayController().getWaitTimeoutTicks(
-                OPEN_TIMEOUT_BASE_TICKS,
-                OPEN_TIMEOUT_SAFETY_TICKS,
-                OPEN_TIMEOUT_MAX_TICKS
-        );
-    }
-
     @Override
     public boolean blocksPrinterWhilePending() {
         return false;
@@ -394,7 +383,6 @@ public final class ChestTrackerAdapter implements InventoryProvider, RuntimeComp
         List<me.aleksilassila.litematica.printer.printer.PrinterBox> boxes = LitematicaUtils.createSelection1Boxes();
         if (boxes.isEmpty()) return 0;
         int added = 0;
-        //#if MC >= 12104
         MemoryBank bank = MemoryBankAccess.INSTANCE.getLoaded().orElse(null);
         var key = ProviderUtils.getPlayersCurrentKey().orElse(null);
         MemoryKey memoryKey = bank == null || key == null ? null : bank.getKey(key).orElse(null);
@@ -409,7 +397,6 @@ public final class ChestTrackerAdapter implements InventoryProvider, RuntimeComp
                 }
             }
         }
-        //#endif
         if (added > 0) this.selectedContainers.save();
         return added;
     }
@@ -490,7 +477,7 @@ public final class ChestTrackerAdapter implements InventoryProvider, RuntimeComp
             if (open(candidate.pos())) {
                 this.targetPos = candidate.pos();
                 this.phase = Phase.WAITING_CONTENT;
-                this.openDeadline = gameTick() + openTimeoutTicks();
+                this.openDeadline = gameTick() + OPEN_TIMEOUT_TICKS;
                 return true;
             }
             this.invalidCandidates.add(candidate.pos());
@@ -533,7 +520,8 @@ public final class ChestTrackerAdapter implements InventoryProvider, RuntimeComp
     private void finishAvailable(boolean closeOwnedMenu) {
         if (this.activeRequest != null) {
             for (Item item : this.activeRequest.acceptedItems()) {
-                if (InventoryUtils.playerHasItemInInventory(this.client.player, item, this.activeRequest::acceptsStack)) {
+                if (InventoryUtils.playerHasItemInInventory(this.client.player, item,
+                        this.activeRequest::acceptsStack, this.activeRequest.minimumCount())) {
                     this.completedReservation = MaterialReservation.available(this.activeRequest, item);
                     break;
                 }
@@ -687,6 +675,14 @@ public final class ChestTrackerAdapter implements InventoryProvider, RuntimeComp
 
     private boolean hasRequestedItem() {
         if (this.client.player == null || this.requestedItem == null) return false;
+        if (this.activeRequest != null && (this.activeRequest.minimumCount() > 1
+                || this.activeRequest.source() == MaterialRequest.Source.BEDROCK)) {
+            for (Item item : this.activeRequest.acceptedItems()) {
+                if (InventoryUtils.playerHasItemInInventory(this.client.player, item,
+                        this::matches, this.activeRequest.minimumCount())) return true;
+            }
+            return false;
+        }
         for (int slot = 0; slot < Math.min(36, this.client.player.getInventory().getContainerSize()); slot++) {
             ItemStack stack = this.client.player.getInventory().getItem(slot);
             if (matches(stack)) {
@@ -734,7 +730,7 @@ public final class ChestTrackerAdapter implements InventoryProvider, RuntimeComp
         }
         this.targetPos = this.nestedReturn.sourcePos();
         this.phase = Phase.RESTORE_WAIT_CONTENT;
-        this.openDeadline = gameTick() + openTimeoutTicks();
+        this.openDeadline = gameTick() + OPEN_TIMEOUT_TICKS;
     }
 
     private void restoreNestedShulker(AbstractContainerMenu menu, int containerSize, LocalPlayer player) {
@@ -806,7 +802,6 @@ public final class ChestTrackerAdapter implements InventoryProvider, RuntimeComp
 
     private void rebuildIndex() {
         this.index.clear();
-        //#if MC >= 12104
         MemoryBank bank = MemoryBankAccess.INSTANCE.getLoaded().orElse(null);
         var key = ProviderUtils.getPlayersCurrentKey().orElse(null);
         if (bank == null || key == null) return;
@@ -845,7 +840,6 @@ public final class ChestTrackerAdapter implements InventoryProvider, RuntimeComp
                 }
             }
         }
-        //#endif
     }
 
     private List<Candidate> orderedCandidates(List<Item> items) {

@@ -8,21 +8,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BedrockTargetStateTest {
     @Test
-    void preservesTheOriginalTickAdvanceRules() {
+    void observationClockAdvancesRegardlessOfStatusAndIsIdempotentWithinATick() {
         BedrockTargetState state = new BedrockTargetState();
 
-        state.beginTick(true);
+        state.beginTick(100);
         assertEquals(0, state.tickTimes());
 
         state.setStatus(BedrockTarget.Status.EXTENDED);
-        state.beginTick(false);
-        assertEquals(0, state.tickTimes());
-        state.beginTick(true);
+        state.beginTick(101);
+        assertEquals(1, state.tickTimes());
+        state.beginTick(101);
         assertEquals(1, state.tickTimes());
 
         state.setStatus(BedrockTarget.Status.NEEDS_WAITING);
-        state.beginTick(false);
-        assertEquals(2, state.tickTimes());
+        state.beginTick(109);
+        assertEquals(9, state.tickTimes());
     }
 
     @Test
@@ -33,7 +33,6 @@ class BedrockTargetStateTest {
         state.setExecuteTick(7);
         state.setInitializeTick(3);
         state.incrementStuckTicks();
-        state.markThroughputAction();
 
         state.resetAttempt();
 
@@ -42,18 +41,23 @@ class BedrockTargetStateTest {
         assertEquals(-1, state.initializeTick());
         assertEquals(0, state.stuckTicks());
         assertFalse(state.hasTried());
-        assertTrue(state.consumedThroughput());
         assertEquals(BedrockTarget.Status.NEEDS_WAITING, state.status());
     }
 
     @Test
-    void throughputMarkerIsPerTick() {
+    void resettingAnAttemptDoesNotAdvanceItsClockAgainInTheSameRuntimeTick() {
         BedrockTargetState state = new BedrockTargetState();
-        state.markThroughputAction();
-        assertTrue(state.consumedThroughput());
+        state.beginTick(10);
+        state.beginTick(14);
+        state.markDispatched();
+        assertEquals(4, state.executeTick());
+        assertTrue(state.hasTried());
+        state.resetAttempt();
 
-        state.beginTick(false);
+        state.beginTick(14);
 
-        assertFalse(state.consumedThroughput());
+        assertEquals(0, state.tickTimes());
+        state.beginTick(15);
+        assertEquals(1, state.tickTimes());
     }
 }

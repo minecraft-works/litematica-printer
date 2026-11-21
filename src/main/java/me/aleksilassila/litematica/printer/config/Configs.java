@@ -54,6 +54,7 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
         optionSet.addAll(Cover.OPTIONS);          // 铺盖
         optionSet.addAll(Fluid.OPTIONS);          // 排流体
         optionSet.addAll(Bedrock.OPTIONS);        // 破基岩
+        optionSet.addAll(Highlight.OPTIONS);
         OPTIONS = ImmutableList.copyOf(optionSet);
 
         List<IHotkey> hotkeys = new ArrayList<>();
@@ -63,6 +64,22 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
             }
         }
         HOTKEYS = ImmutableList.copyOf(hotkeys);
+    }
+
+    /** Operation colors/styles adapted from BiliXWhite/litematica-printer@6cef6d31. */
+    public static class Highlight {
+        public static final ConfigBoolean ENABLED = bool("highlightEnabled").defaultValue(false).build();
+        public static final ConfigBoolean NEXT_ENABLED = bool("highlightNextEnabled").defaultValue(true).build();
+        public static final ConfigColor PLACE = color("highlightColorPlace").defaultValue("#80FFFFFF").build();
+        public static final ConfigColor ADJUST = color("highlightColorAdjust").defaultValue("#8000FF00").build();
+        public static final ConfigColor BREAK = color("highlightColorBreak").defaultValue("#80FF0000").build();
+        public static final ConfigColor FAILED = color("highlightColorFailed").defaultValue("#80808080").build();
+        public static final ConfigColor NEXT = color("highlightColorNext").defaultValue("#FF00FFFF").build();
+        public static final ConfigOptionList STYLE = optionList("highlightStyle").defaultValue(HighlightStyleType.BOTH).build();
+        public static final ConfigInteger FADE_DURATION = integer("highlightFadeDuration").defaultValue(5).range(1, 100).useSlider(true).build();
+        public static final ConfigBoolean THROUGH_WALLS = bool("highlightThroughWalls").defaultValue(false).build();
+        public static final ImmutableList<IConfigBase> OPTIONS = ImmutableList.of(ENABLED, NEXT_ENABLED, PLACE, ADJUST,
+                BREAK, FAILED, NEXT, STYLE, FADE_DURATION, THROUGH_WALLS);
     }
 
     public static class Core {
@@ -128,16 +145,6 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
                 .range(1, 256)
                 .build();
 
-        public static final ConfigInteger SCAN_TIME_BUDGET_MS = integer("scanTimeBudgetMs")
-                .defaultValue(2)
-                .range(1, 10)
-                .build();
-
-        public static final ConfigInteger LAZY_ENTER_TICKS = integer("lazyEnterTicks")
-                .defaultValue(10)
-                .range(0, 40)
-                .build();
-
         // 核心 - 检查玩家方块交互范围
         public static final ConfigBoolean CHECK_PLAYER_INTERACTION_RANGE = bool("checkPlayerInteractionRange")
                 .defaultValue(true)
@@ -158,6 +165,9 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
         public static final ConfigOptionList ITERATOR_SHAPE = optionList("printerIteratorShape")
                 .defaultValue(RadiusShapeType.SPHERE)
                 .build();
+
+        public static final ConfigInteger WORK_PER_TICK = integer("workPerTick")
+                .defaultValue(2048).range(256, 131072).build();
 
         // 核心 - 显示打印机HUD
         public static final ConfigBoolean RENDER_HUD = bool("renderHud")
@@ -208,8 +218,7 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
                 FLUID,
                 COVER,
                 WORK_RANGE,
-                SCAN_TIME_BUDGET_MS,
-                LAZY_ENTER_TICKS,
+                WORK_PER_TICK,
                 RENDER_HUD,
                 MISSING_MATERIAL_HUD,
                 RENDER_HUD_X,
@@ -242,9 +251,13 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
                 .setVisible(ModLoadUtils::isChestTrackerLoaded)
                 .build();
 
-        //#if MC >= 12111
         // 虚空仓库补货：缺料时向服务端的 carpet-Neko-Addition 要一组材料
         public static final ConfigBoolean VOID_WAREHOUSE_RESTOCK = bool("voidWarehouseRestock")
+                .defaultValue(false)
+                .build();
+
+        // 普通方块直接由服务端扣库放置，不经过玩家背包。
+        public static final ConfigBoolean VOID_WAREHOUSE_DIRECT_PLACE = bool("voidWarehouseDirectPlace")
                 .defaultValue(false)
                 .build();
 
@@ -257,7 +270,6 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
         public static final ConfigBoolean VOID_WAREHOUSE_RETURN = bool("voidWarehouseReturn")
                 .defaultValue(false)
                 .build();
-        //#endif
 
         public static final ImmutableList<IConfigBase> OPTIONS = ImmutableList.of(
                 //#if MC < 260200
@@ -268,11 +280,10 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
                 Placement.QUICK_SHULKER_MODE,
                 Placement.QUICK_SHULKER_COOLDOWN,
                 Placement.STORE_ORDERLY,
-                //#if MC >= 12111
                 VOID_WAREHOUSE_RESTOCK,
+                VOID_WAREHOUSE_DIRECT_PLACE,
                 VOID_WAREHOUSE_RETURN,
                 VOID_WAREHOUSE_MATERIAL_LIST,
-                //#endif
                 REMOTE_TAKE
         );
     }
@@ -295,19 +306,6 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
         public static final ConfigInteger PLACE_COOLDOWN = integer("placeCooldown")
                 .defaultValue(8)
                 .range(0, 64)
-                .build();
-
-        // RTT 自适应重放间隔 - 开关
-        // 根据玩家 ping 自动把放置间隔抬到不低于一次往返,减少服务器下「发包快于服务端确认」导致的放错。
-        public static final ConfigBoolean RTT_ADAPTIVE_INTERVAL = bool("placeRttAdaptiveInterval")
-                .defaultValue(false)
-                .build();
-
-        // RTT 自适应 - 安全系数(百分比):以 RTT 的该百分比作为最小间隔,100 = 恰好一个往返。
-        public static final ConfigInteger RTT_SAFETY_PERCENT = integer("placeRttSafetyPercent")
-                .defaultValue(100)
-                .range(25, 300)
-                .setVisible(RTT_ADAPTIVE_INTERVAL::getBooleanValue)
                 .build();
 
         // 下落方块检查
@@ -340,8 +338,6 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
                 PLACE_INTERVAL,
                 PLACE_BLOCKS_PER_TICK,
                 PLACE_COOLDOWN,
-                RTT_ADAPTIVE_INTERVAL,
-                RTT_SAFETY_PERCENT,
                 FALLING_CHECK
         );
     }
@@ -366,16 +362,14 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
 
         // Ceiling for how many blocks the mine session may batch-break in one tick. Each candidate
         // is an independent server judgment (delta*(elapsed+1) >= 0.7 on STOP), so START+STOP pairs
-        // can be dispatched to thousands of blocks in one tick. 0 = unlimited. The optional
-        // Tweakeroo durability guard is only active for bounded small sessions.
+        // can be dispatched to thousands of blocks in one tick. 0 = unlimited.
         public static final ConfigInteger BREAK_BLOCKS_PER_TICK = integer("breakBlocksPerTick")
                 .defaultValue(0)
                 .range(0, 1000)
                 .build();
 
-        // Informational: the server hard-codes the break threshold at 0.7 (delta*(elapsed+1) >= 0.7
-        // on STOP). Mining speed is the same whether this is 70 or 100 — it is kept for
-        // compatibility/display only.
+        // Delayed confirmation uses this configured progress threshold. The regular mining
+        // path uses 0.7, matching the server's delta*(elapsed+1) >= 0.7 check on STOP.
         public static final ConfigInteger BREAK_PROGRESS_THRESHOLD = integer("breakProgressThreshold")
                 .defaultValue(100)
                 .range(70, 100)
@@ -397,6 +391,16 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
 
         public static final ConfigBoolean BREAK_AUTO_TOOL = bool("breakAutoTool")
                 .defaultValue(false)
+                .build();
+
+        public static final ConfigInteger BREAK_TOOL_RESERVE = integer("breakToolReserve")
+                .defaultValue(20)
+                .range(0, 1000)
+                .build();
+
+        // Sends the arm swing while breaking so the local player animates and other players see it.
+        public static final ConfigBoolean BREAK_SWING_ARM = bool("breakSwingArm")
+                .defaultValue(true)
                 .build();
 
         // 模式限制器
@@ -428,6 +432,8 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
                 BREAK_COOLDOWN,
                 BREAK_CHECK_HARDNESS,
                 BREAK_AUTO_TOOL,
+                BREAK_TOOL_RESERVE,
+                BREAK_SWING_ARM,
                 // 限制器
                 BREAK_LIMITER,
                 BREAK_LIMIT,
@@ -437,9 +443,9 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
     }
 
     public static class Bedrock {
-        public static final ConfigInteger BEDROCK_INTERVAL = integer("bedrockInterval")
-                .defaultValue(2)
-                .range(1, 20)
+        public static final ConfigInteger BEDROCK_INTERVAL = integer("bedrockStartInterval")
+                .defaultValue(0)
+                .range(0, 20)
                 .build();
 
         public static final ConfigInteger BEDROCK_BLOCKS_PER_TICK = integer("bedrockBlocksPerTick")
@@ -451,10 +457,6 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
                 .defaultValue(false)
                 .build();
 
-        public static final ConfigBoolean BEDROCK_MULTIPLAYER_ADAPTIVE = bool("bedrockMultiplayerAdaptive")
-                .defaultValue(true)
-                .build();
-
         public static final ConfigStringList BEDROCK_WHITELIST = stringList("bedrockWhitelist")
                 .build();
 
@@ -462,7 +464,6 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
                 BEDROCK_INTERVAL,
                 BEDROCK_BLOCKS_PER_TICK,
                 BEDROCK_ALLOW_SIDE,
-                BEDROCK_MULTIPLAYER_ADAPTIVE,
                 BEDROCK_WHITELIST
         );
     }
@@ -475,7 +476,7 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
 
         // 投影轻松放置协议
         public static final ConfigBoolean EASY_PLACE_PROTOCOL = bool("easyPlaceProtocol")
-                .defaultValue(false)
+                .defaultValue(true)
                 .build();
 
         // 凭空放置
@@ -841,14 +842,10 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
     public void load() {
         File settingFile = new File(FILE_PATH);
         if (settingFile.isFile() && settingFile.exists()) {
-            //#if MC >= 12111
             JsonElement jsonElement = JsonUtils.parseJsonFile(settingFile.toPath());
-            //#else
-            //$$ JsonElement jsonElement = JsonUtils.parseJsonFile(settingFile);
-            //#endif
             if (jsonElement != null && jsonElement.isJsonObject()) {
                 JsonObject obj = jsonElement.getAsJsonObject();
-                ConfigUtils.readConfigBase(obj, Reference.MOD_ID, OPTIONS);
+                boolean performanceMigrated = readOptions(obj);
                 int schemaVersion = obj.has("configSchemaVersion")
                         && obj.get("configSchemaVersion").isJsonPrimitive()
                         && obj.get("configSchemaVersion").getAsJsonPrimitive().isNumber()
@@ -861,9 +858,43 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
                     // persisted compatibility value into a new runtime behavior on upgrade.
                     Break.BREAK_USE_DELAYED_DESTROY.setBooleanValue(false);
                     this.save();
+                } else if (performanceMigrated) {
+                    this.save();
                 }
             }
         }
+    }
+
+    /** Reads saved options while consolidating obsolete performance controls into one workload. */
+    public static boolean readOptions(JsonObject root) {
+        boolean migrated = false;
+        JsonElement section = root.get(Reference.MOD_ID);
+        if (section != null && section.isJsonObject()) {
+            JsonObject values = section.getAsJsonObject();
+            List<String> legacyKeys = List.of("scanTimeBudgetMs", "iterationTimeBudgetMs",
+                    "scanWorkLimitPerTick", "iterationCandidatesPerTick", "scanCacheSizeMiB", "lazyEnterTicks");
+            migrated = legacyKeys.stream().anyMatch(values::has);
+            if (migrated && !values.has("workPerTick")) {
+                long amount = Math.max(legacyPositiveNumber(values, "scanWorkLimitPerTick"),
+                        legacyPositiveNumber(values, "iterationCandidatesPerTick"));
+                if (amount == 0) {
+                    amount = Math.max(legacyPositiveNumber(values, "scanTimeBudgetMs"),
+                            legacyPositiveNumber(values, "iterationTimeBudgetMs")) * 4096L;
+                }
+                values.addProperty("workPerTick", amount == 0 ? Core.WORK_PER_TICK.getDefaultIntegerValue()
+                        : Math.clamp(amount, 256L, 131072L));
+            }
+            legacyKeys.forEach(values::remove);
+        }
+        ConfigUtils.readConfigBase(root, Reference.MOD_ID, OPTIONS);
+        return migrated;
+    }
+
+    private static long legacyPositiveNumber(JsonObject values, String key) {
+        JsonElement value = values.get(key);
+        if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) return 0L;
+        double number = value.getAsDouble();
+        return Double.isFinite(number) && number > 0 ? (long) Math.min(number, 131072L) : 0L;
     }
 
     @Override
@@ -873,11 +904,7 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
             JsonObject configRoot = new JsonObject();
             configRoot.addProperty("configSchemaVersion", CONFIG_SCHEMA_VERSION);
             ConfigUtils.writeConfigBase(configRoot, Reference.MOD_ID, OPTIONS);
-            //#if MC >= 12111
             JsonUtils.writeJsonToFile(configRoot, settingFile.toPath());
-            //#else
-            //$$ JsonUtils.writeJsonToFile(configRoot, settingFile);
-            //#endif
         }
     }
 
@@ -886,11 +913,9 @@ public class Configs extends ConfigBuilders implements IConfigHandler {
         ConfigManager.getInstance().registerConfigHandler(Reference.MOD_ID, Configs.INSTANCE);
         InputEventHandler.getKeybindManager().registerKeybindProvider(InputHandler.getInstance());
         InputEventHandler.getInputManager().registerKeyboardInputHandler(InputHandler.getInstance());
-        //#if MC > 12006
         fi.dy.masa.malilib.registry.Registry.CONFIG_SCREEN.registerConfigScreenFactory(
                 new fi.dy.masa.malilib.util.data.ModInfo(Reference.MOD_ID, Reference.MOD_NAME, ConfigUi::new)
         );
-        //#endif
     }
 
     public static void saveToFile() {

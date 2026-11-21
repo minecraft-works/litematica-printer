@@ -7,8 +7,14 @@
     "printer.litematica.EasyPlaceUtilsAccessor",
     "printer.litematica.InventoryUtilsAccessor",
     "printer.litematica.MixinInventoryUtils",
-    ${rewritten_easy_place_mixins}
-    ${void_warehouse_litematica_mixins}
+    "printer.litematica.MixinSchematicPickHotkeys",
+    "printer.litematica.MixinSchematicPickUseKey",
+    "printer.litematica.MixinEasyPlaceUtils",
+    "printer.litematica.MixinMaterialListEntry",
+    "printer.malilib.GuiListBaseAccessor",
+    "printer.litematica.MixinMaterialListSorter",
+    "printer.litematica.MixinMaterialListHudRenderer",
+    "printer.litematica.MixinWidgetMaterialListEntry",
     "printer.litematica.MixinChunkRendererSchematicVbo",
     "printer.litematica.MixinChunkRenderDispatcherSchematic"
   ],

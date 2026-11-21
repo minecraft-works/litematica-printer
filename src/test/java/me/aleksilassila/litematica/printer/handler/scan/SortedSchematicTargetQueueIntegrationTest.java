@@ -6,6 +6,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import me.aleksilassila.litematica.printer.handler.handlers.print.SortedSchematicTargetQueue;
+import me.aleksilassila.litematica.printer.printer.PrinterBox;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.Bootstrap;
@@ -77,6 +78,31 @@ class SortedSchematicTargetQueueIntegrationTest {
         }
     }
 
+    @Test void aChangedSourceAtTheLastOldCandidateKeepsItsFollowUpPass() throws Exception {
+        try (var fixture = new ScanIntegrationFixture(257)) {
+            var oldBoxes = List.of(new PrinterBox(0, 0, 0, 15, 0, 15));
+            var expandedBoxes = List.of(new PrinterBox(0, 0, 0, 15, 1, 15));
+            fixture.tick(10);
+            assertEquals(255, drain(fixture.cache.iterable("print_sorted", oldBoxes,
+                    fixture.level, fixture.schematic, fixture.player, 255, ScanIntent.PRINT, pos -> true)).size());
+            var queue = new SortedSchematicTargetQueue(fixture.engine());
+
+            assertEquals(1, drain(queue.iterable(
+                    expandedBoxes, fixture.level, fixture.schematic, fixture.player, 1)).size());
+
+            assertTrue(queue.hasPendingWork(),
+                    "The old cursor ending does not complete a newer source revision");
+            List<BlockPos> following = new ArrayList<>();
+            for (int tick = 11; tick <= 13 && queue.hasPendingWork(); tick++) {
+                fixture.tick(tick);
+                following.addAll(drain(queue.iterable(
+                        expandedBoxes, fixture.level, fixture.schematic, fixture.player, 0)));
+            }
+            assertTrue(following.contains(new BlockPos(0, 1, 0)),
+                    "The newly exposed target must not depend on a future world update");
+        }
+    }
+
     @Test void duplicateRetryIsRetainedOnceAlongsideTheNextUnconsumedBatch() throws Exception {
         try (var fixture = new ScanIntegrationFixture(300)) {
             var queue = new SortedSchematicTargetQueue(fixture.engine());
@@ -89,9 +115,16 @@ class SortedSchematicTargetQueueIntegrationTest {
             queue.requeue(null);
             fixture.tick(11);
             List<BlockPos> expected = new ArrayList<>(List.of(retry));
-            expected.addAll(sortedBatch(orderedSource(300).subList(256, 300)));
-            assertEquals(expected, drain(queue.iterable(
+            expected.addAll(sortedBatch(orderedSource(300).subList(256, 272)));
+            List<BlockPos> actual = drain(queue.iterable(
+                    fixture.boxes, fixture.level, fixture.schematic, fixture.player, 0));
+            assertEquals(expected, actual, "A warm refill adds a bounded slice alongside the existing target");
+            fixture.tick(12);
+            actual.addAll(drain(queue.iterable(
                     fixture.boxes, fixture.level, fixture.schematic, fixture.player, 0)));
+            expected.addAll(sortedBatch(orderedSource(300).subList(272, 300)));
+            assertEquals(expected, actual);
+            assertEquals(45, new HashSet<>(actual).size(), "The retry and every following candidate remain unique");
         }
     }
 
@@ -130,27 +163,85 @@ class SortedSchematicTargetQueueIntegrationTest {
         }
     }
 
+    @Test void replacingTheBufferCannotReviveAnOldMergedLookahead() throws Exception {
+        try (var fixture = new ScanIntegrationFixture(2)) {
+            var queue = new SortedSchematicTargetQueue(fixture.engine());
+            fixture.tick(10);
+            Iterable<BlockPos> source = queue.iterable(
+                    fixture.boxes, fixture.level, fixture.schematic, fixture.player, 0);
+            var merged = StableCandidateMerge.merge(List.of(), source, fixture.engine().targetComparator("print"));
+            var oldIterator = merged.iterator();
+            assertTrue(oldIterator.hasNext(), "The old view now owns one prefetched candidate");
+
+            queue.clear();
+            queue.requeue(BlockPos.ZERO);
+
+            assertFalse(oldIterator.hasNext(), "A newly valid buffer cannot make the old view valid again");
+            assertThrows(java.util.NoSuchElementException.class, oldIterator::next);
+            assertEquals(ScanAvailability.COMPLETE, merged.availability());
+            assertEquals(List.of(BlockPos.ZERO), drain(queue));
+        }
+    }
+
+    @Test void aCompletedMatchingSourceRepairsAMissedWorldEventOnItsLazyProbe() throws Exception {
+        try (var fixture = new ScanIntegrationFixture(1)) {
+            var queue = new SortedSchematicTargetQueue(fixture.engine());
+            fixture.level.world.put(BlockPos.ZERO, fixture.schematic.getBlockState(BlockPos.ZERO));
+            fixture.tick(1);
+            assertTrue(drain(queue.iterable(
+                    fixture.boxes, fixture.level, fixture.schematic, fixture.player, 0)).isEmpty());
+            assertEquals(ScanAvailability.COMPLETE, queue.availability());
+            long dirty = fixture.engine().dirtyVersion();
+
+            // Model a missed block notification: change the observation without invalidation.
+            fixture.level.world.put(BlockPos.ZERO, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState());
+            fixture.tick(21);
+
+            assertEquals(List.of(BlockPos.ZERO), drain(queue.iterable(
+                    fixture.boxes, fixture.level, fixture.schematic, fixture.player, 0)),
+                    "A completed buffer must allow the source's due repair to produce work");
+            assertEquals(dirty, fixture.engine().dirtyVersion(), "Repair must not require a block invalidation event");
+        }
+    }
+
+    @Test void anExplicitOwnerResetRedeliversACompletedSourceWithoutDirtyingTheWorld() throws Exception {
+        try (var fixture = new ScanIntegrationFixture(1)) {
+            var engine = fixture.engine();
+            var queue = new SortedSchematicTargetQueue(engine);
+            fixture.tick(1);
+            assertEquals(List.of(BlockPos.ZERO), drain(queue.iterable(
+                    fixture.boxes, fixture.level, fixture.schematic, fixture.player, 0)));
+            assertEquals(ScanAvailability.COMPLETE, queue.availability());
+            long dirty = engine.dirtyVersion();
+
+            engine.resetOwner("print_sorted");
+            fixture.tick(2);
+
+            assertEquals(List.of(BlockPos.ZERO), drain(queue.iterable(
+                    fixture.boxes, fixture.level, fixture.schematic, fixture.player, 0)),
+                    "Owner offer reset must reach the buffer even when dirty revision is unchanged");
+            assertEquals(dirty, engine.dirtyVersion());
+        }
+    }
+
     private static List<BlockPos> orderedSource(int count) {
         List<BlockPos> result = ScanIntegrationFixture.positions(count);
-        result.sort(Comparator.comparingLong((BlockPos pos) ->
-                        (long) pos.getX() * pos.getX() + (long) pos.getY() * pos.getY() + (long) pos.getZ() * pos.getZ())
-                .thenComparingInt(BlockPos::getY).thenComparingInt(BlockPos::getX).thenComparingInt(BlockPos::getZ));
+        result.sort(referenceOrder());
         return result;
     }
 
     private static List<BlockPos> sortedBatch(List<BlockPos> source) {
-        // All targets are ordinary stone/cobblestone and the held item is air. The eye is at zero
-        // and looks along +Z, so the public ordering reduces to these independent geometric keys.
         List<BlockPos> expected = new ArrayList<>(source);
-        expected.sort(Comparator.comparingDouble(SortedSchematicTargetQueueIntegrationTest::eyeDistance)
-                .thenComparingDouble(pos -> -(pos.getZ() + .5) / Math.sqrt(eyeDistance(pos)))
-                .thenComparingInt(BlockPos::getY).thenComparingInt(BlockPos::getX).thenComparingInt(BlockPos::getZ));
+        expected.sort(referenceOrder());
         return expected;
     }
 
-    private static double eyeDistance(BlockPos pos) {
-        double x = pos.getX() + .5, y = pos.getY() + .5, z = pos.getZ() + .5;
-        return x * x + y * y + z * z;
+    private static Comparator<BlockPos> referenceOrder() {
+        // Independent global X-Z-Y reference, including negative world-row parity.
+        return Comparator.comparingInt((BlockPos pos) -> pos.getY())
+                .thenComparingInt(BlockPos::getZ)
+                .thenComparingLong(pos -> Math.floorMod(pos.getZ(), 2) == 0
+                        ? pos.getX() : -(long) pos.getX());
     }
 }
 //#endif

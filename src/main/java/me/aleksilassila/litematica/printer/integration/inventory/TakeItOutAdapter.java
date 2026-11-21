@@ -44,6 +44,11 @@ public final class TakeItOutAdapter implements InventoryProvider {
     }
 
     @Override
+    public boolean supports(MaterialRequest request) {
+        return true;
+    }
+
+    @Override
     public MaterialReservation request(MaterialRequest request) {
         if (!this.acquireResources()) {
             return pending(request);
@@ -99,9 +104,10 @@ public final class TakeItOutAdapter implements InventoryProvider {
         if (this.activeToken == request.token()
                 && this.requestedItem != null
                 // Take It Out clears awaitingStack for any same-type local stack, including a
-                // filled box. Only actual empty-box availability or the coordinator's bounded
-                // timeout can finish this stricter request after it has been accepted.
-                && (request.emptyShulkerOnly() || this.takeItOut.isAwaitingItem(this.requestedItem))) {
+                // filled box or an insufficient partial stack. Keep the existing response
+                // deadline until the stricter requirement is actually satisfied.
+                && (request.emptyShulkerOnly() || request.minimumCount() > 1
+                    || this.takeItOut.isAwaitingItem(this.requestedItem))) {
             return pending(request);
         }
         this.releaseResources();
@@ -161,7 +167,8 @@ public final class TakeItOutAdapter implements InventoryProvider {
 
     private static Item findAvailableItem(MaterialRequest request) {
         for (Item item : request.acceptedItems()) {
-            if (InventoryUtils.playerHasItemInInventory(Minecraft.getInstance().player, item, request::acceptsStack)) {
+            if (InventoryUtils.playerHasItemInInventory(Minecraft.getInstance().player, item,
+                    request::acceptsStack, request.minimumCount())) {
                 return item;
             }
         }
@@ -170,7 +177,8 @@ public final class TakeItOutAdapter implements InventoryProvider {
 
     private static void selectCompletedPickBlockItem(MaterialRequest request, Item item) {
         Minecraft client = Minecraft.getInstance();
-        if (request.source() == MaterialRequest.Source.PICK_BLOCK
+        if ((request.source() == MaterialRequest.Source.PICK_BLOCK
+                || request.source() == MaterialRequest.Source.TAKE_IT_OUT_PICK)
                 && client.player != null
                 && client.player.containerMenu == client.player.inventoryMenu) {
             InventoryUtils.setPickedItemToHand(new ItemStack(item), client);

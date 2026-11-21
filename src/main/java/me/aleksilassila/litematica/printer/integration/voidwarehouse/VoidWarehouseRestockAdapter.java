@@ -1,6 +1,5 @@
 package me.aleksilassila.litematica.printer.integration.voidwarehouse;
 
-//#if MC >= 12111
 import me.aleksilassila.litematica.printer.config.Configs;
 import me.aleksilassila.litematica.printer.core.action.ResourceLease;
 import me.aleksilassila.litematica.printer.printer.action.ActionPort;
@@ -57,6 +56,7 @@ public final class VoidWarehouseRestockAdapter implements InventoryProvider {
      * 5 秒足够让「真的去补货」这件事完成。</p>
      */
     private static final long FAILED_COOLDOWN_TICKS = 100L;
+    private static final long INVENTORY_SYNC_GRACE_TICKS = 5L;
     private static final String LEASE_OWNER = "void_warehouse";
 
     private final Minecraft client = Minecraft.getInstance();
@@ -65,9 +65,13 @@ public final class VoidWarehouseRestockAdapter implements InventoryProvider {
 
     private MaterialRequest activeRequest;
     private int activeNonce;
+    private Object requestPlayer;
+    private Object requestLevel;
+    private Object requestConnection;
+    private long firstSuccessfulReceiptTick = Long.MIN_VALUE;
+    private boolean inventorySyncRequested;
 
-    private MaterialRequest lastFailedRequest;
-    private long lastFailedTick = Long.MIN_VALUE;
+    private final Map<FailedRequirement, Long> failedAt = new HashMap<>();
 
     /**
      * 返还控制器：到货时往它账上记一笔，等背包吃紧或收工时退回去。
@@ -90,6 +94,7 @@ public final class VoidWarehouseRestockAdapter implements InventoryProvider {
             @Override public boolean isSupported() { return VoidWarehouseRestockNetwork.isSupported(); }
             @Override public int requestTake(List<String> candidates) { return VoidWarehouseRestockNetwork.requestTake(candidates); }
             @Override public int statusOf(int nonce) { return VoidWarehouseRestockNetwork.statusOf(nonce); }
+            @Override public void requestInventorySync() { VoidWarehouseRestockNetwork.requestInventorySync(); }
             @Override public void forget() { VoidWarehouseRestockNetwork.forget(); }
         });
     }
@@ -137,6 +142,11 @@ public final class VoidWarehouseRestockAdapter implements InventoryProvider {
         }
         // 发货前的件数快照：到货后靠它算净增量（服务端塞不下的部分会回滚）
         rememberHeldBefore(request);
+        this.requestPlayer = this.client.player;
+        this.requestLevel = this.client.level;
+        this.requestConnection = this.client.getConnection();
+        this.firstSuccessfulReceiptTick = Long.MIN_VALUE;
+        this.inventorySyncRequested = false;
         int nonce = this.network.requestTake(candidates);
         if (nonce == 0) {
             finish();
@@ -172,7 +182,7 @@ public final class VoidWarehouseRestockAdapter implements InventoryProvider {
                 return pending(request);
             }
             if (status == PrinterTakeResultPayload.OK) {
-                recordDelivery(availableItem);
+                recordDelivery(request, availableItem);
             }
             selectCompletedPickBlockItem(request, availableItem);
             finish();
@@ -183,7 +193,9 @@ public final class VoidWarehouseRestockAdapter implements InventoryProvider {
             return pending(request);
         }
         if (status == PrinterTakeResultPayload.OK) {
-            // 服务端说给了，但背包同步还没到。继续轮询背包，直到超时为止。
+            // Consume + refill of a one-item stack can match the server's old slot snapshot.
+            // If that suppressed its normal delta, recover with one authoritative full snapshot.
+            recoverMissingInventory();
             return pending(request);
         }
         rememberFailure(request);
@@ -209,8 +221,7 @@ public final class VoidWarehouseRestockAdapter implements InventoryProvider {
     @Override
     public void reset() {
         finish();
-        this.lastFailedRequest = null;
-        this.lastFailedTick = Long.MIN_VALUE;
+        this.failedAt.clear();
     }
 
     /**
@@ -233,26 +244,53 @@ public final class VoidWarehouseRestockAdapter implements InventoryProvider {
     private boolean failedRecently(MaterialRequest request) {
         // Tokens and callers may change while the material requirement stays the same.
         // A different candidate list or stack constraint must be allowed to query the warehouse.
-        if (this.lastFailedRequest == null
-                || request.preferredItem() != this.lastFailedRequest.preferredItem()
-                || !request.acceptedItems().equals(this.lastFailedRequest.acceptedItems())
-                || request.emptyShulkerOnly() != this.lastFailedRequest.emptyShulkerOnly()) {
-            return false;
-        }
-        return gameTick() - this.lastFailedTick < FAILED_COOLDOWN_TICKS;
+        long now = gameTick();
+        this.failedAt.values().removeIf(tick -> now - tick >= FAILED_COOLDOWN_TICKS);
+        return this.failedAt.containsKey(FailedRequirement.of(request));
     }
 
     private void rememberFailure(MaterialRequest request) {
-        this.lastFailedRequest = request;
-        this.lastFailedTick = gameTick();
+        // Alternating missing materials must not evict each other's failure cooldown.
+        this.failedAt.put(FailedRequirement.of(request), gameTick());
+    }
+
+    private record FailedRequirement(Item preferredItem, List<Item> acceptedItems, boolean emptyShulkerOnly) {
+        static FailedRequirement of(MaterialRequest request) {
+            return new FailedRequirement(request.preferredItem(), request.acceptedItems(), request.emptyShulkerOnly());
+        }
     }
 
     private void finish() {
         this.actionBroker.releaseOwner(LEASE_OWNER);
         this.activeRequest = null;
         this.activeNonce = 0;
+        this.requestPlayer = null;
+        this.requestLevel = null;
+        this.requestConnection = null;
+        this.firstSuccessfulReceiptTick = Long.MIN_VALUE;
+        this.inventorySyncRequested = false;
         this.heldBefore.clear();
         this.network.forget();
+    }
+
+    private void recoverMissingInventory() {
+        if (this.inventorySyncRequested || this.client.player != this.requestPlayer
+                || this.client.level != this.requestLevel || this.client.getConnection() != this.requestConnection) {
+            return;
+        }
+        long now = gameTick();
+        if (this.firstSuccessfulReceiptTick == Long.MIN_VALUE || now < this.firstSuccessfulReceiptTick) {
+            this.firstSuccessfulReceiptTick = now;
+            return;
+        }
+        if (now - this.firstSuccessfulReceiptTick < INVENTORY_SYNC_GRACE_TICKS
+                || this.client.player.containerMenu != this.client.player.inventoryMenu
+                || !this.client.player.inventoryMenu.getCarried().isEmpty()) {
+            return;
+        }
+        // status() already owns INVENTORY/CONTAINER/MAIN_HAND. Never retry the take or predict its slot.
+        this.inventorySyncRequested = true;
+        this.network.requestInventorySync();
     }
 
     private boolean acquireResources() {
@@ -264,7 +302,8 @@ public final class VoidWarehouseRestockAdapter implements InventoryProvider {
 
     private Item findAvailableItem(MaterialRequest request) {
         for (Item item : request.acceptedItems()) {
-            if (InventoryUtils.playerHasItemInInventory(this.client.player, item, request::acceptsStack)) {
+            if (InventoryUtils.playerHasItemInInventory(this.client.player, item,
+                    request::acceptsStack, request.minimumCount())) {
                 return item;
             }
         }
@@ -338,18 +377,43 @@ public final class VoidWarehouseRestockAdapter implements InventoryProvider {
      * 的窗口里 {@code activeItems()} 是空的，控制器自己分不清「余料」与「马上要用的料」，
      * 于是刚发到手就退回、下一 tick 再要，形成「退 → 要 → 退」的空转。</p>
      */
-    private void recordDelivery(Item item) {
+    private void recordDelivery(MaterialRequest request, Item item) {
         if (this.returnController == null) {
             return;
         }
         int before = this.heldBefore.getOrDefault(item, 0);
         int now = countHeld(item);
+        // 基线无论如何都要推进：它是「这一批到货了多少」的参照，与记不记账无关。
+        // 不推进的话，下一批真打印会把这一批 pick block 的增量一起算成自己的到货量。
+        this.heldBefore.put(item, now);
+        if (!booksAsLeftover(request.source())) {
+            return;
+        }
         int delivered = now - before;
         if (delivered > 0) {
             this.returnController.recordTaken(item, delivered);
             this.returnController.markDelivered(item);
         }
-        this.heldBefore.put(item, now);
+    }
+
+    /**
+     * 这一笔到货要不要记进<b>余料返还</b>的账本。
+     *
+     * <p>🔴 中键 pick block 要的是<b>玩家自己要用的</b>东西，不是打印耗材。记进账本的表现是
+     * 「玩家刚拿到手，关掉界面那一刻立刻被收回仓库」—— 因为
+     * {@code VoidWarehouseReturnController#tick()} 在 {@code containerMenu != inventoryMenu}
+     * （有界面开着）时直接 {@code return} 不发货，所以界面一开就不退、一关就退，
+     * 看起来像「东西凭空没了」。</p>
+     *
+     * <p>另外两个补货适配器（{@code TakeItOutAdapter} / {@code ChestTrackerAdapter}）
+     * 都按 {@code source} 分流，这里必须一致，否则同一个中键在三条补货路线上有三种语义。</p>
+     *
+     * <p>抽成静态方法是为了让这条边界在单测里咬死（{@code VoidWarehouseReturnLedgerTest}）——
+     * 玩家取物来源不属于打印耗材，包括受限的 TIO 自动取物。</p>
+     */
+    static boolean booksAsLeftover(MaterialRequest.Source source) {
+        return source != MaterialRequest.Source.PICK_BLOCK
+                && source != MaterialRequest.Source.TAKE_IT_OUT_PICK;
     }
 
     /** 主背包 + 快捷栏里某种物品的件数（与服务端的 36 格口径一致）。 */
@@ -372,4 +436,3 @@ public final class VoidWarehouseRestockAdapter implements InventoryProvider {
         return new MaterialReservation(request.token(), MaterialReservation.State.UNAVAILABLE);
     }
 }
-//#endif

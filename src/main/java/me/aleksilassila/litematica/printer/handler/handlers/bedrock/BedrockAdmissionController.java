@@ -8,6 +8,9 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 
 import java.util.LinkedHashSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.LongSupplier;
 
@@ -36,13 +39,15 @@ final class BedrockAdmissionController {
     private final LitematicaAdapter litematica;
     private final BedrockExposureGate<BlockPos> exposureGate =
             new BedrockExposureGate<>(MAX_VERTICAL_EXPOSURE_DEFERS);
+    private final Set<BlockPos> exposureApprovedThisTick = new HashSet<>();
     private final BedrockScanActivityPolicy scanActivity = new BedrockScanActivityPolicy();
     private final BedrockSubmissionPlanCache submissionPlans = new BedrockSubmissionPlanCache();
     private final BedrockSchedulingProbe schedulingProbe;
     private long nextAcceptTick;
     private int cleanupPressure;
     private int blockedCleanupDemand;
-    private int submissionBudget = 1;
+    private int submissionBudget;
+    private final Map<BlockPos, BlockPos> cleanupDependencies = new HashMap<>();
 
     BedrockAdmissionController(
             Minecraft client,
@@ -71,21 +76,29 @@ final class BedrockAdmissionController {
 
     void reset() {
         this.exposureGate.clear();
+        this.exposureApprovedThisTick.clear();
         this.scanActivity.reset();
         this.submissionPlans.clear();
         this.nextAcceptTick = 0L;
         this.cleanupPressure = 0;
         this.blockedCleanupDemand = 0;
-        this.submissionBudget = 1;
+        this.submissionBudget = 0;
+        this.cleanupDependencies.clear();
     }
 
     void beginTick(ClientLevel level) {
+        this.exposureApprovedThisTick.clear();
+        this.cleanupDependencies.keySet().removeIf(pos -> !this.isPositionOnRetryCooldown(pos));
         this.blockedCleanupDemand = 0;
         this.cleanupPressure = this.cleanup.samplePressure(level, this.targets::isReserved);
     }
 
     void setSubmissionBudget(int budget) {
         this.submissionBudget = Math.max(0, budget);
+    }
+
+    boolean hasSubmissionBudget() {
+        return this.submissionBudget > 0;
     }
 
     void refreshCleanupPressure(ClientLevel level) {
@@ -160,12 +173,8 @@ final class BedrockAdmissionController {
         BlockPos pendingCleanup = this.findPendingCleanupConflict(target);
         if (pendingCleanup != null) {
             this.stats.lastReason = "pending_cleanup";
-            var state = level.getBlockState(pendingCleanup);
-            this.cleanup.expedite(pendingCleanup, state, this.targets::isReserved);
-            this.setRetryCooldown(stablePos, Math.max(
-                    SUBMIT_RETRY_COOLDOWN_TICKS,
-                    this.cleanup.retryDelay(state) + 2
-            ));
+            this.setRetryCooldown(stablePos, SUBMIT_RETRY_COOLDOWN_TICKS);
+            this.cleanupDependencies.put(stablePos, pendingCleanup);
             this.noteSubmitRejected("pending_cleanup");
             return false;
         }
@@ -176,6 +185,7 @@ final class BedrockAdmissionController {
             this.noteSubmitRejected("machine_overlap");
             return false;
         }
+        this.cleanup.transferOwnership(target.getReservedPositions());
         this.targets.add(target);
         this.stats.acceptedThisTick++;
         this.submissionBudget--;
@@ -209,29 +219,49 @@ final class BedrockAdmissionController {
 
     void setRetryCooldown(BlockPos pos, int ticks) {
         if (this.client.level != null && pos != null && ticks > 0) {
+            this.cleanupDependencies.remove(pos);
             this.cooldownUtils.setCooldown(this.client.level, RETRY_COOLDOWN_KEY, pos, ticks);
             this.scanActivity.recordRetry(this.tickClock.getAsLong(), ticks);
         }
+    }
+
+    void onServerBlockUpdate(BlockPos changed) {
+        var level = this.client.level;
+        if (level == null || !BedrockEnvironment.isChunkLoaded(level, changed)
+                || BedrockTargetBlocks.isCleanupResidue(level.getBlockState(changed))) return;
+        this.cleanupDependencies.entrySet().removeIf(entry -> {
+            if (!entry.getValue().equals(changed)) return false;
+            this.cooldownUtils.removeCooldown(level, RETRY_COOLDOWN_KEY, entry.getKey());
+            return true;
+        });
     }
 
     int configuredThroughput() {
         return Math.max(1, Configs.Bedrock.BEDROCK_BLOCKS_PER_TICK.getIntegerValue());
     }
 
+    int effectiveThroughput() {
+        return BedrockSchedulingPolicy.effectiveThroughput(this.configuredThroughput(), this.isSideEnabled());
+    }
+
     int configuredInterval() {
-        return Math.max(1, Configs.Bedrock.BEDROCK_INTERVAL.getIntegerValue());
+        return Math.max(0, Configs.Bedrock.BEDROCK_INTERVAL.getIntegerValue());
     }
 
     int submitCap() {
-        return BedrockSchedulingPolicy.submitCap(this.configuredThroughput(), this.cleanupPressure);
+        return this.effectiveThroughput();
     }
 
     int activeCap() {
-        return this.verticalActiveCap() + this.sideCap();
+        return this.effectiveThroughput();
+    }
+
+    int activeCycleCount() {
+        return this.targets.countActive() + this.cleanup.reachableCycleCount();
     }
 
     int verticalActiveCap() {
-        return BedrockSchedulingPolicy.verticalActiveCap(this.configuredThroughput());
+        return BedrockSchedulingPolicy.verticalActiveCap(this.effectiveThroughput());
     }
 
     int sideCap() {
@@ -271,11 +301,9 @@ final class BedrockAdmissionController {
 
     void purgeTargetsOutsideSelection() {
         this.targets.removeOutsideSelection(this::isWithinActiveSelection, target -> {
-            this.placer.cancelPistonRetry(target.getPistonPos());
+            this.placer.cancelPistonPlacement(target.getPistonPos());
             this.networkSync.discarded(target.getBedrockPos(), false);
-            for (BlockPos tempPos : target.getCleanupPositions()) {
-                this.cleanup.cleanupBlockOrQueue(tempPos, false, this.targets::isReserved);
-            }
+            this.cleanup.enqueueCycle(target.getBedrockPos(), target.getCleanupPositions(), target.isHorizontalLayout());
         });
     }
 
@@ -286,6 +314,12 @@ final class BedrockAdmissionController {
         for (BlockPos pos : blockingCleanupPositions(candidate)) {
             if (pos.equals(candidate.getBedrockPos())) {
                 continue;
+            }
+            if (this.placer.isCleanupPendingAt(pos)
+                    || this.cleanup.contains(pos) && !BedrockEnvironment.isChunkLoaded(this.client.level, pos)) {
+                this.blockedCleanupDemand++;
+                this.cleanup.markBlocked(pos);
+                return pos;
             }
             var state = this.client.level.getBlockState(pos);
             if (state.isAir() || (!BedrockTargetBlocks.isCleanupResidue(state) && !this.targets.isReserved(pos))) {
@@ -309,13 +343,13 @@ final class BedrockAdmissionController {
     }
 
     private AcceptProbe probeCanScanForTargets() {
-        if (this.submissionBudget <= 0) {
+        if (!this.hasSubmissionBudget()) {
             return AcceptProbe.reject("interval_window");
         }
-        if (this.stats.confirmedSuccesses == 0
-                && this.configuredThroughput() <= 1
-                && !this.targets.isEmpty()) {
-            return AcceptProbe.reject("startup_serial");
+        // A horizontal machine retains its look ownership even after Side is disabled.
+        // Existing reservations drain normally when a mode change reduces the total cap.
+        if (this.targets.findSideExclusive() != null) {
+            return AcceptProbe.reject("side_lane_busy");
         }
         if (this.tickClock.getAsLong() < this.nextAcceptTick) {
             return AcceptProbe.reject("accept_backpressure");
@@ -323,13 +357,8 @@ final class BedrockAdmissionController {
         if (this.stats.acceptedThisTick >= this.submitCap()) {
             return AcceptProbe.reject("submit_cap");
         }
-        if (this.targets.countVerticalActive() < this.verticalActiveCap()) {
-            return AcceptProbe.accept();
-        }
-        if (this.isSideEnabled() && this.targets.findSideExclusive() == null) {
-            return AcceptProbe.accept();
-        }
-        return AcceptProbe.reject("active_cap");
+        return this.activeCycleCount() < this.activeCap()
+                ? AcceptProbe.accept() : AcceptProbe.reject("active_cap");
     }
 
     private AcceptProbe probeCanAccept(BlockPos pos, boolean mutateExposureState) {
@@ -339,17 +368,15 @@ final class BedrockAdmissionController {
         if (this.isPositionOnRetryCooldown(pos)) return AcceptProbe.reject("retry_cooldown");
         boolean horizontal = this.isHorizontalSubmission(pos);
         if (horizontal && !this.isSideEnabled()) return AcceptProbe.reject("side_disabled");
-        if (horizontal && this.targets.findSideExclusive() != null) return AcceptProbe.reject("side_lane_busy");
-        if (!horizontal && this.targets.countVerticalActive() >= this.verticalActiveCap()) {
-            return AcceptProbe.reject("active_cap");
-        }
         if (this.targets.isReserved(pos)) return AcceptProbe.reject("reserved_by_active_target");
         if (!BedrockEnvironment.canInteract(pos)) return AcceptProbe.reject("out_of_range_bedrock");
-        boolean shouldDefer = this.client.level != null
-                && BedrockMachineLayout.shouldDeferUntilExposed(this.client.level, pos);
-        if (this.exposureGate.evaluate(pos, shouldDefer, mutateExposureState)
-                == BedrockExposureGate.Decision.DEFER) {
-            return AcceptProbe.reject("await_target_exposure");
+        if (!this.exposureApprovedThisTick.contains(pos)) {
+            boolean shouldDefer = BedrockMachineLayout.shouldDeferUntilExposed(this.client.level, pos);
+            if (this.exposureGate.evaluate(pos, shouldDefer, mutateExposureState) == BedrockExposureGate.Decision.DEFER) {
+                return AcceptProbe.reject("await_target_exposure");
+            }
+            // Share exposure approval across planning, iteration and submit; keep the other guards live.
+            if (shouldDefer && mutateExposureState) this.exposureApprovedThisTick.add(pos);
         }
         String conflict = this.targets.activePositionConflict(pos);
         return conflict == null ? AcceptProbe.accept() : AcceptProbe.reject(conflict);
@@ -382,9 +409,7 @@ final class BedrockAdmissionController {
             weight = 0;
         }
         this.stats.rejectedThisTick += weight;
-        boolean heavyPressure = this.cleanupPressure
-                >= BedrockSchedulingPolicy.highCleanupPressureThreshold(this.configuredThroughput());
-        if (heavyPressure || this.stats.rejectedThisTick >= Math.max(8, this.configuredThroughput())) {
+        if (this.stats.rejectedThisTick >= Math.max(8, this.configuredThroughput())) {
             this.nextAcceptTick = Math.max(
                     this.nextAcceptTick,
                     this.tickClock.getAsLong() + ACCEPT_BACKPRESSURE_TICKS

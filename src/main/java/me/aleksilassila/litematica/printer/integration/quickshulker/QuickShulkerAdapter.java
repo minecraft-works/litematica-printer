@@ -153,6 +153,7 @@ public final class QuickShulkerAdapter implements InventoryProvider, RuntimeComp
 
     @Override
     public void tick() {
+        this.orderedStorage.deferUnopenedRestoreForBedrock();
         if (this.requests.isCancelling() || this.orderedStorage.isDraining()
                 || me.aleksilassila.litematica.printer.utils.mods.ShulkerUtils.isRecovering()) {
             if (!this.acquireResources()) return;
@@ -295,7 +296,8 @@ public final class QuickShulkerAdapter implements InventoryProvider, RuntimeComp
 
     private static Item findAvailableItem(MaterialRequest request) {
         for (Item item : request.acceptedItems()) {
-            if (InventoryUtils.playerHasItemInInventory(Minecraft.getInstance().player, item, request::acceptsStack)) {
+            if (InventoryUtils.playerHasItemInInventory(Minecraft.getInstance().player, item,
+                    request::acceptsStack, request.minimumCount())) {
                 return item;
             }
         }

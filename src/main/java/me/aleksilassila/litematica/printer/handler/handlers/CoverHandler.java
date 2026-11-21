@@ -1,7 +1,7 @@
 package me.aleksilassila.litematica.printer.handler.handlers;
 
 import me.aleksilassila.litematica.printer.integration.inventory.MaterialRequest;
-import com.google.common.collect.Iterables;
+import me.aleksilassila.litematica.printer.interfaces.Implementation;
 import me.aleksilassila.litematica.printer.I18n;
 import me.aleksilassila.litematica.printer.config.Configs;
 import me.aleksilassila.litematica.printer.core.action.ResourceLease;
@@ -12,6 +12,8 @@ import me.aleksilassila.litematica.printer.handler.FeatureModuleBase;
 import me.aleksilassila.litematica.printer.handler.HudStatsManager;
 import me.aleksilassila.litematica.printer.handler.HudStatus;
 import me.aleksilassila.litematica.printer.handler.scan.ScanIntent;
+import me.aleksilassila.litematica.printer.handler.scan.StableCandidateMerge;
+import me.aleksilassila.litematica.printer.handler.scan.BoundedTargetSet;
 import me.aleksilassila.litematica.printer.printer.PlayerLook;
 import me.aleksilassila.litematica.printer.printer.PrinterBox;
 import me.aleksilassila.litematica.printer.printer.PrinterUtils;
@@ -48,7 +50,8 @@ public final class CoverHandler extends FeatureModuleBase {
 
     private List<String> blockListCache = List.of();
     private Item[] coverItems = new Item[0];
-    private final Set<BlockPos> retryTargets = new LinkedHashSet<>();
+    private final Set<BlockPos> retryTargets = new BoundedTargetSet(BoundedTargetSet.DEFAULT_CAPACITY, null,
+            pos -> this.scanEngine.reoffer(this.getId(), pos));
     private final Set<BlockPos> inFlightTargets = new LinkedHashSet<>();
     private final Map<BlockPos, Long> inFlightSince = new HashMap<>();
     private int observedScanConfigHash = Integer.MIN_VALUE;
@@ -168,7 +171,7 @@ public final class CoverHandler extends FeatureModuleBase {
                         && this.isCoverTarget(pos))
                 .toList();
         if (sourceBoxes.isEmpty()) {
-            return retained;
+            return StableCandidateMerge.merge(retained, List.of(), this.scanEngine.targetComparator(NAME));
         }
 
         Iterable<BlockPos> source = this.scanEngine.iterable(
@@ -184,12 +187,17 @@ public final class CoverHandler extends FeatureModuleBase {
                         && !this.inFlightTargets.contains(pos),
                 pos -> reach.test(pos) && selection.test(pos)
         );
-        return retained.isEmpty() ? source : Iterables.concat(retained, source);
+        return StableCandidateMerge.merge(retained, source, this.scanEngine.targetComparator(NAME),
+                pos -> this.retryTargets.add(pos.immutable()));
     }
 
     @Override
     public boolean canIterationBlockPos(BlockPos pos) {
         return this.coverItems.length > 0 && this.isCoverTarget(pos);
+    }
+
+    @Override protected BlockPos peekQueuedIterationTarget() {
+        return this.peekRetainedIterationTarget(this.retryTargets, pos -> !this.inFlightTargets.contains(pos));
     }
 
     @Override
@@ -258,7 +266,7 @@ public final class CoverHandler extends FeatureModuleBase {
                 support,
                 Direction.UP,
                 Vec3.ZERO,
-                false,
+                Implementation.isInteractive(this.level.getBlockState(support).getBlock()),
                 1,
                 expectedItems,
                 ActionPort.ActionSource.COVER

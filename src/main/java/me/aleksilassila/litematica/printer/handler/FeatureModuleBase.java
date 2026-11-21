@@ -1,6 +1,5 @@
 package me.aleksilassila.litematica.printer.handler;
 
-import fi.dy.masa.litematica.world.WorldSchematic;
 import fi.dy.masa.malilib.config.options.ConfigBoolean;
 import fi.dy.masa.malilib.config.options.ConfigOptionList;
 import me.aleksilassila.litematica.printer.config.Configs;
@@ -39,7 +38,6 @@ public abstract class FeatureModuleBase extends ConfigUtils implements RuntimeCo
     @Nullable
     private final AtomicReference<PrinterBox> externalScanBoxRef;
     private final InteractionBoxTracker interactionBoxTracker;
-    private final GuiBlockInfoBuffer guiBlockInfoBuffer = new GuiBlockInfoBuffer();
     private final ModuleScanCoordinator scanCoordinator;
     private final ModuleSelectionScope selectionScope;
     private final ModuleRuntimeLoop runtimeLoop;
@@ -48,8 +46,6 @@ public abstract class FeatureModuleBase extends ConfigUtils implements RuntimeCo
     protected final ScanEngine scanEngine;
     protected final ActionPort actionBroker;
     protected final CooldownUtils cooldownUtils;
-    protected final RttReplayController rttReplayController;
-    protected final PlacementRateController placementRateController;
     protected final HudStatsManager hudStats;
     protected final MissingMaterialTracker missingMaterials;
     protected final LitematicaAdapter litematica;
@@ -61,6 +57,9 @@ public abstract class FeatureModuleBase extends ConfigUtils implements RuntimeCo
     @Nullable
     private final ConfigOptionList selectionType;
     private boolean iterationConsumedEffectiveExecution = true;
+    private long additionalIterationActionNanos;
+    private net.minecraft.world.phys.Vec3 previewPlayerPosition;
+    private List<PrinterBox> previewSources = List.of();
 
     protected Minecraft mc;
     protected ClientLevel level;
@@ -95,8 +94,6 @@ public abstract class FeatureModuleBase extends ConfigUtils implements RuntimeCo
         this.scanEngine = runtime.scanEngine();
         this.actionBroker = runtime.actionBroker();
         this.cooldownUtils = runtime.cooldownUtils();
-        this.rttReplayController = runtime.rttReplayController();
-        this.placementRateController = runtime.placementRateController();
         this.hudStats = runtime.hudStats();
         this.missingMaterials = runtime.missingMaterials();
         this.litematica = runtime.litematica();
@@ -109,7 +106,7 @@ public abstract class FeatureModuleBase extends ConfigUtils implements RuntimeCo
         this.playerInteractionBox = this.interactionBoxTracker.getBoxReference();
         this.externalScanBoxRef = this.playerInteractionBox == null ? null : new AtomicReference<>();
         this.scanCoordinator = new ModuleScanCoordinator(
-                new ModuleScanHost(this), this.externalScanBoxRef, this.scanEngine);
+                new ModuleScanHost(this), this.externalScanBoxRef);
         this.selectionScope = new ModuleSelectionScope(this, selectionType);
         this.runtimeLoop = new ModuleRuntimeLoop(this);
         this.updateVariables(TickContext.capture());
@@ -124,8 +121,8 @@ public abstract class FeatureModuleBase extends ConfigUtils implements RuntimeCo
         this.updateVariables(TickContext.capture());
         this.resetScanRuntime();
         this.resetPlayerTracking();
-        this.guiBlockInfoBuffer.resetForTracking(false);
         this.iterationConsumedEffectiveExecution = true;
+        this.additionalIterationActionNanos = 0L;
         this.clearScanSourceCache();
         this.runtimeLoop.reset();
         this.onRuntimeReset();
@@ -161,7 +158,11 @@ public abstract class FeatureModuleBase extends ConfigUtils implements RuntimeCo
             return false;
         }
         PrinterBox playerInteractionBox = this.playerInteractionBox.get();
-        if (playerInteractionBox == null || !this.canIterate()) {
+        if (playerInteractionBox == null) {
+            this.scanCoordinator.clearScopeDiagnostics();
+            return false;
+        }
+        if (!this.canIterate()) {
             return false;
         }
         return this.scanCoordinator.run(playerInteractionBox);
@@ -181,8 +182,50 @@ public abstract class FeatureModuleBase extends ConfigUtils implements RuntimeCo
     }
 
     void resetScanRuntime() {
+        this.previewPlayerPosition = null;
+        this.previewSources = List.of();
         this.scanEngine.resetOwner(this.id);
         this.scanCoordinator.reset();
+    }
+
+    void rememberIterationPreviewScope(PrinterBox box) {
+        if (!Configs.Highlight.ENABLED.getBooleanValue()) {
+            this.previewPlayerPosition = null;
+            this.previewSources = List.of();
+            return;
+        }
+        this.previewPlayerPosition = this.player == null ? null : this.player.position();
+        this.previewSources = List.copyOf(this.getScanSourceBoxes(box));
+    }
+
+    public final me.aleksilassila.litematica.printer.render.OperationHighlights.Preview nextIterationPreview() {
+        if (this.player == null || this.level == null || this.mc == null || this.mc.level != this.level
+                || this.previewPlayerPosition == null || !this.previewPlayerPosition.equals(this.player.position())
+                || !this.isConfigAllowExecute() || this.playerInteractionBox == null
+                || this.playerInteractionBox.get() == null
+                || !this.previewSources.equals(this.getScanSourceBoxes(this.playerInteractionBox.get()))) return null;
+        // The scan cursor may still point at air or an unclassified position. Only retained
+        // operation targets are previews; rendering must not classify or advance the source.
+        BlockPos next = this.peekQueuedIterationTarget();
+        if (next == null || !this.isPreviewPositionAllowed(next)) return null;
+        return new me.aleksilassila.litematica.printer.render.OperationHighlights.Preview(next.immutable(), true);
+    }
+
+    protected String getPreviewScanOwner() { return this.id; }
+    protected BlockPos peekQueuedIterationTarget() { return null; }
+    protected boolean isPreviewPositionAllowed(BlockPos pos) {
+        return this.canReachIterationPosition(pos) && this.isInSelectionRange(pos);
+    }
+
+    /** Reads bounded retained metadata only; eligibility is checked by the real runner. */
+    protected final BlockPos peekRetainedIterationTarget(Iterable<BlockPos> retained, Predicate<BlockPos> eligible) {
+        BlockPos next = null;
+        var order = this.scanEngine.targetComparator(this.getPreviewScanOwner());
+        for (BlockPos pos : retained) {
+            if (eligible.test(pos) && this.isPreviewPositionAllowed(pos)
+                    && (next == null || order.compare(pos, next) < 0)) next = pos;
+        }
+        return next;
     }
 
     public final IterationOutcome runIteration(PrinterBox playerInteractionBox) {
@@ -203,6 +246,10 @@ public abstract class FeatureModuleBase extends ConfigUtils implements RuntimeCo
     protected void stopIteration(boolean interrupt) {
     }
 
+    /** Retains a consumed candidate whose timer or input owner has not become ready yet. */
+    protected void onIterationDeferred(BlockPos pos) {
+    }
+
     protected void onRuntimeReset() {
     }
 
@@ -214,53 +261,11 @@ public abstract class FeatureModuleBase extends ConfigUtils implements RuntimeCo
         return true;
     }
 
-    protected boolean shouldTrackGuiBlockInfo() {
-        return false;
-    }
-
-    GuiBlockInfoBuffer guiBuffer() {
-        return this.guiBlockInfoBuffer;
-    }
-
-    @Nullable
-    GuiBlockInfo createGuiBlockInfo(boolean enabled, BlockPos pos) {
-        if (!enabled) {
-            return null;
-        }
-        if (isSchematicBlockHandler()) {
-            WorldSchematic schematic = this.litematica.schematicWorld();
-            return new GuiBlockInfo(level, schematic, pos);
-        }
-        return new GuiBlockInfo(level, null, pos);
-    }
-
-    @Nullable
-    public GuiBlockInfo getCurrentRenderGuiBlockInfo() {
-        return this.guiBlockInfoBuffer.current();
-    }
-
-    @Nullable
-    public GuiBlockInfo getGuiBlockInfo() {
-        return this.guiBlockInfoBuffer.latest();
-    }
-
-    public void setGuiBlockInfo(@Nullable GuiBlockInfo guiBlockInfo) {
-        this.guiBlockInfoBuffer.add(guiBlockInfo);
-    }
-
-    public int getGuiBlockInfoQueueSize() {
-        return this.guiBlockInfoBuffer.size();
-    }
-
-    public int getRenderIndex() {
-        return this.guiBlockInfoBuffer.renderIndex();
-    }
-
     boolean isConfigAllowExecute() {
         return ModuleEnablePolicy.allows(this);
     }
 
-    boolean isSchematicBlock(BlockPos pos) {
+    protected boolean isSchematicBlock(BlockPos pos) {
         return this.litematica.isSchematicBlock(pos);
     }
 
@@ -290,10 +295,6 @@ public abstract class FeatureModuleBase extends ConfigUtils implements RuntimeCo
 
     protected Iterable<BlockPos> getIterationPositions(PrinterBox playerInteractionBox) {
         return playerInteractionBox;
-    }
-
-    protected Iterable<BlockPos> getFilteredIterationPositions(PrinterBox playerInteractionBox, Predicate<BlockPos> candidatePredicate) {
-        return ModuleCandidateSource.raw(this, playerInteractionBox, candidatePredicate);
     }
 
     protected Iterable<BlockPos> getCachedFilteredIterationPositions(PrinterBox playerInteractionBox, ScanIntent intent, Predicate<BlockPos> candidatePredicate) {
@@ -336,6 +337,8 @@ public abstract class FeatureModuleBase extends ConfigUtils implements RuntimeCo
 
     /** Inventory gains wake only the feature that explicitly owns a waiting target. */
     protected void onInventoryAvailabilityChanged() {
+        this.scanEngine.resetOwner(this.id);
+        this.requestFullScan();
     }
 
     public int getPendingIterationWorkCount() {
@@ -375,6 +378,19 @@ public abstract class FeatureModuleBase extends ConfigUtils implements RuntimeCo
 
     final void beginEffectiveExecution() {
         this.iterationConsumedEffectiveExecution = true;
+    }
+
+    final void beginIterationActionAccounting() {
+        this.additionalIterationActionNanos = 0L;
+    }
+
+    /** Accounts for real action dispatch performed by a feature's completion hook. */
+    protected final void recordIterationActionNanos(long nanos) {
+        this.additionalIterationActionNanos += Math.max(0L, nanos);
+    }
+
+    final long additionalIterationActionNanos() {
+        return this.additionalIterationActionNanos;
     }
 
     final boolean consumedEffectiveExecution() {

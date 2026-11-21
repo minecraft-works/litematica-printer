@@ -199,7 +199,7 @@ tasks {
         val embeddedJarsDir = layout.buildDirectory.dir("tmp/submods/META-INF/jars")
         val standaloneJarsDir = layout.buildDirectory.dir("libs/jars")
 
-        // 依赖所有子项目的 remapJar 任务
+        // 构建并收集所有 Minecraft 子项目的独立 JAR。
         dependsOn(fabricSubprojects.map { it.tasks.named("buildAndCollect") })
 
         doFirst {
@@ -224,7 +224,6 @@ tasks {
             optimizeWrapperSubmoduleJars(
                 embeddedJarsDir.get().asFile,
                 setOf(
-                    "assets/$modId/icon.png",
                     "assets/$modId/lang/"
                 )
             )
@@ -235,7 +234,6 @@ tasks {
     named<Jar>("jar") {
         outputs.upToDateWhen { false }
 
-        from(rootProject.file("LICENSE"))
         from(layout.buildDirectory.dir("tmp/submods"))
     }
 

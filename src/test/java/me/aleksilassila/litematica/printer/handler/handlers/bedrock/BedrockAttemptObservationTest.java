@@ -42,7 +42,7 @@ class BedrockAttemptObservationTest {
         f.tick.set(104);
         f.sync.recordRetry(TARGET);
         f.sync.recordRetry(TARGET);
-        assertEquals(1, f.sync.pendingCount(), "Keep the existing HUD pending-observation lifetime");
+        assertEquals(0, f.sync.pendingCount(), "A closed attempt releases its observation before rebuilding");
         f.tick.set(106);
         f.sync.onServerBlockUpdate(TARGET);
         f.sync.beginAttempt(TARGET, Set.of(TARGET));
@@ -119,12 +119,12 @@ class BedrockAttemptObservationTest {
     @Test void disabledProfilingKeepsExistingTrackingWithoutSamples() {
         var tick = new AtomicLong(100);
         var timing = RuntimeTiming.disabled();
-        var sync = new BedrockNetworkSync(tick::get, () -> 0, timing);
+        var sync = new BedrockNetworkSync(tick::get, timing);
         sync.beginAttempt(TARGET, Set.of(TARGET));
         assertEquals(1, sync.pendingCount());
         tick.set(104);
         sync.recordRetry(TARGET);
-        assertEquals(1, sync.pendingCount());
+        assertEquals(0, sync.pendingCount());
         sync.confirmed(TARGET);
         assertEquals(0, sync.pendingCount());
         assertTrue(timing.snapshot().counters().isEmpty());
@@ -134,7 +134,7 @@ class BedrockAttemptObservationTest {
     private static final class Fixture {
         final AtomicLong tick = new AtomicLong(100);
         final RuntimeTiming timing = new RuntimeTiming(true, () -> 0);
-        final BedrockNetworkSync sync = new BedrockNetworkSync(tick::get, () -> 0, timing);
+        final BedrockNetworkSync sync = new BedrockNetworkSync(tick::get, timing);
 
         long count(RuntimeTiming.Reason reason) {
             return this.timing.snapshot().counters().stream()

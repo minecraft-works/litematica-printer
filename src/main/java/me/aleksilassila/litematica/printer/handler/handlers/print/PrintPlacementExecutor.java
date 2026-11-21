@@ -9,7 +9,6 @@ import me.aleksilassila.litematica.printer.handler.handlers.PrintHandler;
 import me.aleksilassila.litematica.printer.integration.inventory.MaterialRequestCoordinator;
 import me.aleksilassila.litematica.printer.interfaces.Implementation;
 import me.aleksilassila.litematica.printer.printer.action.ActionPort;
-import me.aleksilassila.litematica.printer.printer.PlacementRateController;
 import me.aleksilassila.litematica.printer.printer.MissingMaterialTracker;
 import me.aleksilassila.litematica.printer.printer.PlayerLook;
 import me.aleksilassila.litematica.printer.printer.SchematicBlockContext;
@@ -19,9 +18,13 @@ import me.aleksilassila.litematica.printer.utils.ConfigUtils;
 import me.aleksilassila.litematica.printer.utils.CooldownUtils;
 import me.aleksilassila.litematica.printer.utils.InventoryUtils;
 import me.aleksilassila.litematica.printer.utils.InventorySwitchGuard;
+import me.aleksilassila.litematica.printer.utils.VoidWarehouseTriggerItem;
 import me.aleksilassila.litematica.printer.utils.minecraft.DirectionUtils;
 import me.aleksilassila.litematica.printer.utils.minecraft.MessageUtils;
 import me.aleksilassila.litematica.printer.integration.litematica.LitematicaAdapter;
+import me.aleksilassila.litematica.printer.integration.voidwarehouse.VoidWarehousePlacementNetwork;
+import me.aleksilassila.litematica.printer.integration.voidwarehouse.VoidWarehousePlacementPolicy;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.item.Item;
@@ -44,7 +47,6 @@ public final class PrintPlacementExecutor {
     private final LitematicaAdapter litematica;
     private final FallingPlacementTracker fallingPlacements;
     private final MaterialRequestCoordinator materialRequests;
-    private final PlacementRateController placementRateController;
     private static final Item[] EMPTY_HAND_ITEMS = {Items.AIR};
     private static final long RESERVE_NOTICE_COOLDOWN_TICKS = 100L;
     private long lastReserveNoticeTick = Long.MIN_VALUE;
@@ -57,8 +59,7 @@ public final class PrintPlacementExecutor {
             MissingMaterialTracker missingMaterials,
             LitematicaAdapter litematica,
             FallingPlacementTracker fallingPlacements,
-            MaterialRequestCoordinator materialRequests,
-            PlacementRateController placementRateController
+            MaterialRequestCoordinator materialRequests
     ) {
         this.actionBroker = actionBroker;
         this.cooldownUtils = cooldownUtils;
@@ -68,7 +69,6 @@ public final class PrintPlacementExecutor {
         this.litematica = litematica;
         this.fallingPlacements = fallingPlacements;
         this.materialRequests = materialRequests;
-        this.placementRateController = placementRateController;
     }
 
     public PrintPlacementResult execute(SchematicBlockContext context, Action action, @Nullable PrintTaskAction taskAction) {
@@ -93,10 +93,60 @@ public final class PrintPlacementExecutor {
 
         Item[] requiredItems = normalizeRequiredItems(action.getRequiredItems(context.requiredState.getBlock()));
         Predicate<ItemStack> requiredStackPredicate = action.getRequiredStackPredicate();
+        Vec3 hitModifier = this.litematica.usePrecisionPlacement(blockPos, context.requiredState);
+        boolean warehousePlace = false;
+        boolean warehouseEligible = VoidWarehousePlacementPolicy.supports(action, requiredItems, hitModifier);
+        if (warehouseEligible && VoidWarehousePlacementNetwork.isNegotiating()) {
+            // Do not withdraw a legacy stack while the first capability reply is still on its way.
+            this.hudStats.recordDeferred(HudStatsManager.Mode.PRINT, HudStatus.WAITING_RETRIEVAL);
+            return PrintPlacementResult.deferred(false);
+        }
+        boolean warehouseSupported = warehouseEligible && VoidWarehousePlacementNetwork.isAvailable()
+                && (hitModifier == null || VoidWarehousePlacementNetwork.isStatePlacementSupported());
+        boolean warehouseTargetAvailable = warehouseSupported && VoidWarehousePlacementNetwork.isTargetAvailable(blockPos);
+        VoidWarehousePlacementPolicy.Route warehouseRoute = VoidWarehousePlacementPolicy.route(
+                warehouseSupported,
+                warehouseSupported && VoidWarehousePlacementNetwork.isMaterialAvailable(requiredItems),
+                warehouseTargetAvailable,
+                warehouseSupported && VoidWarehousePlacementNetwork.canRequest(requiredItems, blockPos));
+        if (warehouseRoute == VoidWarehousePlacementPolicy.Route.MATERIAL_UNAVAILABLE) {
+            if (!VoidWarehousePlacementNetwork.canUseInventoryFallback(blockPos)) {
+                warehouseRoute = VoidWarehousePlacementPolicy.Route.WAIT;
+            } else if (hasLocalMaterial(context, requiredItems, requiredStackPredicate)) {
+                // An EMPTY reply only rules out warehouse stock. Existing player materials
+                // still use the ordinary inventory path, with its switch and reserve guards.
+                warehouseRoute = VoidWarehousePlacementPolicy.Route.INVENTORY;
+            }
+        }
+        if (warehouseRoute == VoidWarehousePlacementPolicy.Route.MATERIAL_UNAVAILABLE) {
+            this.hudStats.recordDeferred(HudStatsManager.Mode.PRINT, HudStatus.MISSING_MATERIAL);
+            this.missingMaterials.recordMissing(requiredItems, requiredStackPredicate,
+                    action.getRequiredCreativeStack(), context.level.getGameTime());
+            // The candidate cooldown expiry publishes MaterialAvailabilityChanged and wakes this work.
+            return PrintPlacementResult.materialUnavailable(false);
+        }
+        if (warehouseRoute == VoidWarehousePlacementPolicy.Route.WAIT) {
+            // Stock, stale snapshots and rejected clicks must not turn into a legacy stack withdrawal.
+            this.hudStats.recordDeferred(HudStatsManager.Mode.PRINT, HudStatus.WAITING_RETRIEVAL);
+            return PrintPlacementResult.deferred(false);
+        }
+        warehousePlace = warehouseRoute == VoidWarehousePlacementPolicy.Route.DIRECT;
+        if (warehouseRoute == VoidWarehousePlacementPolicy.Route.INVENTORY) {
+            VoidWarehousePlacementNetwork.recordInventoryFallback(requiredItems, blockPos,
+                    action.getClass().getSimpleName(), warehouseEligible, hitModifier != null);
+        }
+        if (!warehousePlace && context.client.player.containerMenu != context.client.player.inventoryMenu) {
+            this.hudStats.recordDeferred(HudStatsManager.Mode.PRINT, HudStatus.WAITING_ITEM_SYNC);
+            // Menu closure does not add material. Keep this target retryable instead of
+            // parking it until an unrelated inventory gain or manual item change.
+            return PrintPlacementResult.deferred(false);
+        }
         boolean reserveItems = Configs.Print.PRINT_RESERVE_ITEMS.getBooleanValue();
         int reserveCount = Configs.Print.PRINT_RESERVE_ITEM_COUNT.getIntegerValue();
         boolean itemReady;
-        if (requiredStackPredicate == null) {
+        if (warehousePlace) {
+            itemReady = true;
+        } else if (requiredStackPredicate == null) {
             itemReady = reserveItems
                     ? InventoryUtils.switchToItemsWithReserve(context.client.player, requiredItems, reserveCount)
                     : InventoryUtils.switchToItems(context.client.player, requiredItems);
@@ -169,15 +219,10 @@ public final class PrintPlacementExecutor {
             return PrintPlacementResult.materialUnavailable(false);
         }
         this.missingMaterials.resolve(requiredItems, requiredStackPredicate);
-        if (!InventoryUtils.isHoldingAnyItem(context.client.player, requiredItems)
+        if (!warehousePlace && (!InventoryUtils.isHoldingAnyItem(context.client.player, requiredItems)
                 || requiredStackPredicate != null
-                && !requiredStackPredicate.test(context.client.player.getMainHandItem())) {
+                && !requiredStackPredicate.test(context.client.player.getMainHandItem()))) {
             this.hudStats.recordDeferred(HudStatsManager.Mode.PRINT, HudStatus.WAITING_ITEM_SYNC);
-            return PrintPlacementResult.deferred(true);
-        }
-
-        if (!this.placementRateController.canSend(context.level.getGameTime())) {
-            this.hudStats.recordDeferred(HudStatsManager.Mode.PRINT, HudStatus.RTT_THROTTLED);
             return PrintPlacementResult.deferred(true);
         }
 
@@ -187,11 +232,21 @@ public final class PrintPlacementExecutor {
             return PrintPlacementResult.cancelled(true);
         }
         this.actionBroker.setExpectedStackPredicate(requiredStackPredicate);
-        Vec3 hitModifier = this.litematica.usePrecisionPlacement(blockPos, context.requiredState);
+        if (warehousePlace && !(hitModifier == null
+                ? this.actionBroker.setWarehousePlacement(blockPos, Block.getId(context.currentState))
+                : this.actionBroker.setWarehouseStatePlacement(blockPos, Block.getId(context.currentState), context.requiredState))) {
+            this.actionBroker.cancelQueue();
+            return PrintPlacementResult.cancelled(false);
+        }
         if (hitModifier != null) {
             this.actionBroker.useProtocolHitModifier(hitModifier);
         }
-        this.actionBroker.setLook(adjustHorizontalLook(action.getPlayerLook(), context));
+        if (action.requiresExactLook()) {
+            this.actionBroker.setWaitForHorizontalLook(false);
+            this.actionBroker.setLook(action.getPlayerLook());
+        } else {
+            this.actionBroker.setLook(adjustHorizontalLook(action.getPlayerLook(), context));
+        }
         this.actionBroker.setNeedWaitModifyLookFromAction(action.isNeedWaitModifyLook());
         boolean consumedEffectiveExecution = action.isConsumeEffectiveExecution();
         int cooldownTicks = action.getCooldownTicksOverride() >= 0
@@ -268,11 +323,39 @@ public final class PrintPlacementExecutor {
         );
     }
 
+    /** Pure availability check: a failed warehouse request must not start a legacy withdrawal. */
+    private static boolean hasLocalMaterial(SchematicBlockContext context, Item[] requiredItems,
+                                            @Nullable Predicate<ItemStack> requiredStackPredicate) {
+        var player = context.client.player;
+        if (player == null) return false;
+        int reserveCount = Configs.Print.PRINT_RESERVE_ITEMS.getBooleanValue()
+                ? Configs.Print.PRINT_RESERVE_ITEM_COUNT.getIntegerValue() : -1;
+        var inventory = player.getInventory();
+        for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
+            ItemStack stack = inventory.getItem(slot);
+            if (!VoidWarehouseTriggerItem.isUsableAsMaterial(stack)) continue;
+            boolean accepted = requiredStackPredicate != null && requiredStackPredicate.test(stack);
+            if (requiredStackPredicate == null) {
+                for (Item item : requiredItems) {
+                    if (stack.is(item)) { accepted = true; break; }
+                }
+            }
+            if (accepted && InventoryUtils.getConsumableSurplus(player, stack, requiredStackPredicate, reserveCount) > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void recordPlacementSent(
             SchematicBlockContext context,
             Action action,
             @Nullable PrintTaskAction taskAction
     ) {
+        me.aleksilassila.litematica.printer.render.OperationHighlights.emit(context.blockPos,
+                action instanceof me.aleksilassila.litematica.printer.printer.action.ClickAction
+                        ? me.aleksilassila.litematica.printer.enums.HighlightType.ADJUST
+                        : me.aleksilassila.litematica.printer.enums.HighlightType.PLACE);
         if (context.requiredState.getBlock() instanceof SignBlock) {
             this.actionBroker.confirmPrintSignEditSent(context.blockPos);
         }
@@ -285,7 +368,6 @@ public final class PrintPlacementExecutor {
         );
         this.hudStats.recordRateUnit(HudStatsManager.Mode.PRINT, 1);
         this.hudStats.recordStatus(HudStatsManager.Mode.PRINT, HudStatus.RUNNING);
-        this.placementRateController.recordSent(context.level.getGameTime());
         if (context.requiredState.getBlock() instanceof FallingBlock) {
             this.fallingPlacements.mark(
                     context.blockPos,

@@ -1,19 +1,11 @@
 @file:Suppress("UnstableApiUsage")
 
-import java.text.SimpleDateFormat
-import java.util.*
-
 plugins {
     id("mod-plugin")
     id("maven-publish")
     id("net.fabricmc.fabric-loom")
     id("com.replaymod.preprocess")
 }
-
-val time = SimpleDateFormat("yyMMdd")
-    .apply { timeZone = TimeZone.getTimeZone("GMT+08:00") }
-    .format(Date())
-    .toString()
 
 version = artifactVersion
 group = modMavenGroup
@@ -33,7 +25,6 @@ repositories {
     strictMaven("https://maven.fallenbreath.me/releases")
     strictMaven("https://masa.dy.fi/maven/sakura-ryoko", "fi.dy.masa")
 
-    strictMaven("https://www.cursemaven.com", "curse.maven")
     strictMaven("https://api.modrinth.com/maven", "maven.modrinth")
 
     strictMaven("https://maven.terraformersmc.com/releases", "com.terraformersmc")  // ModMenu
@@ -137,14 +128,14 @@ tasks.withType<Test>().configureEach {
 }
 
 loom {
-    val commonVmArgs = listOf("-Dmixin.debug.export=true", "-Dmixin.debug.verbose=true", "-Dmixin.env.remapRefMap=true")
+    val commonVmArgs = listOf("-Dmixin.debug.export=true", "-Dmixin.debug.verbose=true")
     val programArgs = listOf("--width", "1280", "--height", "720", "--username", "PrinterTest")
     runs {
         named("client") {
-            ideConfigGenerated(true)
-            vmArgs(commonVmArgs)
-            programArgs(programArgs)
-            runDir = if (project.name == "26.3") "../../run/client-26.3" else "../../run/client"
+            generateRunConfig.set(true)
+            jvmArguments.addAll(commonVmArgs)
+            programArguments.addAll(programArgs)
+            runDirectory.set(file(if (project.name == "26.3") "../../run/client-26.3" else "../../run/client"))
         }
     }
 }

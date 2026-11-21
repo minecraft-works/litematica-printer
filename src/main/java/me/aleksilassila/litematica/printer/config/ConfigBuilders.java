@@ -3,6 +3,7 @@ package me.aleksilassila.litematica.printer.config;
 import me.aleksilassila.litematica.printer.config.builder.*;
 
 public class ConfigBuilders {
+    public static ColorConfigBuilder color(String key) { return new ColorConfigBuilder(key); }
     public static BooleanHotkeyConfigBuilder booleanHotkey(String translateKey) {
         return new BooleanHotkeyConfigBuilder(translateKey);
     }
@@ -23,15 +24,7 @@ public class ConfigBuilders {
         return new StringListConfigBuilder(translateKey);
     }
 
-    public static StringConfigBuilder string(String translateKey) {
-        return new StringConfigBuilder(translateKey);
-    }
-
     public static OptionListConfigBuilder optionList(String translateKey) {
         return new OptionListConfigBuilder(translateKey);
-    }
-
-    public static ColorConfigBuilder color(String translateKey) {
-        return new ColorConfigBuilder(translateKey);
     }
 }
